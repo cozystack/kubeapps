@@ -36,7 +36,9 @@ import (
 
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/clientgetter"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/restmapper"
 )
 
@@ -49,17 +51,21 @@ type Server struct {
 	v1alpha1.UnimplementedFluxV2PackagesServiceServer
 	v1alpha1.UnimplementedFluxV2RepositoriesServiceServer
 
-	// kubeappsCluster specifies the cluster on which Kubeapps is installed.
+	// kubeappsCluster specifies the cluster on which Kubeapps is installed
 	kubeappsCluster string
-	// clientGetter is a field so that it can be switched in tests for
-	// a fake client. NewServer() below sets this automatically with the
-	// non-test implementation.
-	// It is meant for in-band interactions (i.e. in the context of a caller)
-	// with k8s API server
+
+	// clientGetter is used for in-band interactions with k8s API server
 	clientGetter clientgetter.ClientProviderInterface
+
 	// for interactions with k8s API server in the context of
 	// kubeapps-internal-kubeappsapis service account
 	serviceAccountClientGetter clientgetter.FixedClusterClientProviderInterface
+
+	// dynamicClient is used for interacting with dynamically discovered resources
+	dynamicClient dynamic.Interface
+
+	// discoveryClient is used for discovering available API resources
+	discoveryClient discovery.DiscoveryInterface
 
 	actionConfigGetter helm.HelmActionConfigGetterFunc
 
@@ -131,6 +137,23 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 				}
 			},
 		}
+
+		// Create dynamic client
+		config, err := configGetter(http.Header{}, s.kubeappsCluster)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get config: %w", err)
+		}
+
+		dynamicClient, err := dynamic.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+		}
+
+		discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create discovery client: %w", err)
+		}
+
 		if repoCache, err := cache.NewNamespacedResourceWatcherCache(
 			"repoCache", repoCacheConfig, redisCli, stopCh, false); err != nil {
 			return nil, err
@@ -143,6 +166,8 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 			return &Server{
 				clientGetter:               clientProvider,
 				serviceAccountClientGetter: backgroundClientGetter,
+				dynamicClient:              dynamicClient,
+				discoveryClient:            discoveryClient,
 				actionConfigGetter: helm.NewHelmActionConfigGetter(
 					configGetter, kubeappsCluster),
 				repoCache:       repoCache,
@@ -320,7 +345,10 @@ func (s *Server) GetInstalledPackageSummaries(ctx context.Context, request *conn
 
 	pageSize := request.Msg.GetPaginationOptions().GetPageSize()
 	installedPkgSummaries, err := s.paginatedInstalledPkgSummaries(
-		ctx, request.Header(), request.Msg.GetContext().GetNamespace(), pageSize, itemOffset)
+		ctx,
+		request.Msg.GetContext().GetNamespace(),
+		pageSize,
+		itemOffset)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +387,7 @@ func (s *Server) GetInstalledPackageDetail(ctx context.Context, request *connect
 	}
 
 	key := types.NamespacedName{Namespace: packageRef.Context.Namespace, Name: packageRef.Identifier}
-	pkgDetail, err := s.installedPackageDetail(ctx, request.Header(), key)
+	pkgDetail, err := s.installedPackageDetail(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -399,11 +427,9 @@ func (s *Server) CreateInstalledPackage(ctx context.Context, request *connect.Re
 
 	if installedRef, err := s.newRelease(
 		ctx,
-		request.Header(),
 		request.Msg.AvailablePackageRef,
 		name,
 		request.Msg.PkgVersionReference,
-		request.Msg.ReconciliationOptions,
 		request.Msg.Values); err != nil {
 		return nil, err
 	} else {
@@ -429,10 +455,8 @@ func (s *Server) UpdateInstalledPackage(ctx context.Context, request *connect.Re
 
 	if installedRef, err := s.updateRelease(
 		ctx,
-		request.Header(),
 		installedPackageRef,
 		request.Msg.PkgVersionReference,
-		request.Msg.ReconciliationOptions,
 		request.Msg.Values); err != nil {
 		return nil, err
 	} else {
@@ -456,7 +480,7 @@ func (s *Server) DeleteInstalledPackage(ctx context.Context, request *connect.Re
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("Not supported yet: request.installedPackageRef.Context.Cluster: [%v]", cluster))
 	}
 
-	if err := s.deleteRelease(ctx, request.Header(), request.Msg.InstalledPackageRef); err != nil {
+	if err := s.deleteRelease(ctx, request.Msg.InstalledPackageRef); err != nil {
 		return nil, err
 	} else {
 		return connect.NewResponse(&corev1.DeleteInstalledPackageResponse{}), nil
@@ -719,8 +743,9 @@ func (s *Server) newRepoEventSink() repoEventSink {
 	// kubeapps-internal-kubeappsapis account. If we don't like that behavior,
 	// I can easily switch to BackgroundClientGetter here
 	return repoEventSink{
-		clientGetter: cg,
-		chartCache:   s.chartCache,
+		clientGetter:    cg,
+		chartCache:      s.chartCache,
+		kubeappsCluster: s.kubeappsCluster,
 	}
 }
 

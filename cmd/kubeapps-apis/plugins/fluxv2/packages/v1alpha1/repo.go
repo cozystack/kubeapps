@@ -546,8 +546,9 @@ func (s *Server) deleteRepo(ctx context.Context, headers http.Header, repoRef *c
 
 // implements plug-in specific cache-related functionality
 type repoEventSink struct {
-	clientGetter clientgetter.FixedClusterClientProviderInterface
-	chartCache   *cache.ChartCache // chartCache maybe nil only in unit tests
+	clientGetter    clientgetter.FixedClusterClientProviderInterface
+	chartCache      *cache.ChartCache // chartCache maybe nil only in unit tests
+	kubeappsCluster string
 }
 
 // this is what we store in the cache for each cached repo

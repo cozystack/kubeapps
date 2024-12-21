@@ -1,702 +1,317 @@
-// Copyright 2021-2024 the Kubeapps contributors.
-// SPDX-License-Identifier: Apache-2.0
-
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
-	"github.com/bufbuild/connect-go"
-	helmv2 "github.com/fluxcd/helm-controller/api/v2"
-	fluxmeta "github.com/fluxcd/pkg/apis/meta"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
-	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/fluxv2/packages/v1alpha1/common"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/connecterror"
-	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/pkgutils"
-	"github.com/vmware-tanzu/kubeapps/pkg/chart/models"
-	httpclient "github.com/vmware-tanzu/kubeapps/pkg/http-client"
-	"github.com/vmware-tanzu/kubeapps/pkg/tarutil"
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/release"
-	"helm.sh/helm/v3/pkg/storage/driver"
-	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	log "k8s.io/klog/v2"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
-var (
-	// default reconcile interval is 1 min
-	defaultReconcileInterval = metav1.Duration{Duration: 1 * time.Minute}
-)
-
-// namespace maybe "", in which case releases from all namespaces are returned
-func (s *Server) listReleasesInCluster(ctx context.Context, headers http.Header, namespace string) ([]helmv2.HelmRelease, error) {
-	client, err := s.getClient(headers, namespace)
+// getAvailableResourceTypes returns a list of available custom resource types
+// in the apps.cozystack.io API group
+func (s *Server) getAvailableResourceTypes(ctx context.Context) ([]schema.GroupVersionResource, error) {
+	resources, err := s.discoveryClient.ServerResourcesForGroupVersion("apps.cozystack.io/v1alpha1")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to discover resources: %w", err)
 	}
 
-	// TODO (gfichtenholt)
-	// 1) we need to make sure that .List() always returns results in the
-	// same order, otherwise pagination is broken (duplicates maybe returned and some entries
-	// missing).
-	// 2) there is a "consistent snapshot" problem, where the client doesn't want to
-	// see any results created/updated/deleted after the first request is issued
-	// To fix this, we must make use of resourceVersion := relList.GetResourceVersion()
-	var relList helmv2.HelmReleaseList
-	listOptions := ctrlclient.ListOptions{
-		LabelSelector: labels.SelectorFromSet(labels.Set{"cozystack.io/ui": "true"}),
+	var gvrs []schema.GroupVersionResource
+	for _, r := range resources.APIResources {
+		gvrs = append(gvrs, schema.GroupVersionResource{
+			Group:    "apps.cozystack.io",
+			Version:  "v1alpha1",
+			Resource: r.Name,
+		})
 	}
-	if err = client.List(ctx, &relList, &listOptions); err != nil {
-		return nil, connecterror.FromK8sError("list", "HelmRelease", namespace+"/*", err)
-	} else {
-		return relList.Items, nil
-	}
+	return gvrs, nil
 }
 
-func (s *Server) getReleaseInCluster(ctx context.Context, headers http.Header, key types.NamespacedName) (*helmv2.HelmRelease, error) {
-	client, err := s.getClient(headers, key.Namespace)
+// listReleasesInCluster returns all installed applications across available custom resource types
+func (s *Server) listReleasesInCluster(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
+	var allReleases []*unstructured.Unstructured
+
+	gvrs, err := s.getAvailableResourceTypes(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var rel helmv2.HelmRelease
-	if err = client.Get(ctx, key, &rel); err != nil {
-		return nil, connecterror.FromK8sError("get", "HelmRelease", key.String(), err)
+	for _, gvr := range gvrs {
+		list, err := s.dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			log.Errorf("Failed to list resources for %s: %v", gvr.String(), err)
+			continue
+		}
+		for i := range list.Items {
+			allReleases = append(allReleases, &list.Items[i])
+		}
 	}
-	return &rel, nil
+
+	return allReleases, nil
 }
 
-func (s *Server) paginatedInstalledPkgSummaries(ctx context.Context, headers http.Header, namespace string, pageSize int32, itemOffset int) ([]*corev1.InstalledPackageSummary, error) {
-	releasesFromCluster, err := s.listReleasesInCluster(ctx, headers, namespace)
+// getReleaseInCluster gets a specific application instance by its type and name
+func (s *Server) getReleaseInCluster(ctx context.Context, gvr schema.GroupVersionResource, key types.NamespacedName) (*unstructured.Unstructured, error) {
+	obj, err := s.dynamicClient.Resource(gvr).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, connecterror.FromK8sError("get", gvr.Resource, key.String(), err)
+	}
+	return obj, nil
+}
+
+func (s *Server) paginatedInstalledPkgSummaries(ctx context.Context, namespace string, pageSize int32, offset int) ([]*corev1.InstalledPackageSummary, error) {
+	releasesFromCluster, err := s.listReleasesInCluster(ctx, namespace)
 	if err != nil {
 		return nil, err
 	}
 
-	installedPkgSummaries := []*corev1.InstalledPackageSummary{}
+	summaries := []*corev1.InstalledPackageSummary{}
 	if len(releasesFromCluster) > 0 {
 		startAt := -1
 		if pageSize > 0 {
-			startAt = itemOffset
+			startAt = offset
 		}
 
 		for i, r := range releasesFromCluster {
 			if startAt <= i {
-				summary, err := s.installedPkgSummaryFromRelease(ctx, headers, r)
+				summary, err := s.installedPkgSummaryFromRelease(ctx, r)
 				if err != nil {
 					return nil, err
-				} else if summary == nil {
-					// not ready yet
-					continue
 				}
-				installedPkgSummaries = append(installedPkgSummaries, summary)
-				if pageSize > 0 && len(installedPkgSummaries) == int(pageSize) {
-					break
+				if summary != nil {
+					summaries = append(summaries, summary)
+					if pageSize > 0 && len(summaries) == int(pageSize) {
+						break
+					}
 				}
 			}
 		}
 	}
-	return installedPkgSummaries, nil
+	return summaries, nil
 }
 
-func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers http.Header, rel helmv2.HelmRelease) (*corev1.InstalledPackageSummary, error) {
-	name, err := common.NamespacedName(&rel)
-	if err != nil {
-		return nil, err
-	}
-
-	var latestPkgVersion *corev1.PackageAppVersion
-	var pkgVersion *corev1.VersionReference
-
-	version := rel.Spec.Chart.Spec.Version
-	if version != "" {
-		pkgVersion = &corev1.VersionReference{
-			Version: version,
-		}
-	}
-
-	var pkgDetail *corev1.AvailablePackageDetail
-
-	// see https://fluxcd.io/docs/components/helm/helmreleases/
-	helmChartRef := rel.Status.HelmChart
-	if helmChartRef == "" {
-		log.Warningf("Missing element status.helmChart on HelmRelease [%s]", name)
-	}
-
-	repoName := rel.Spec.Chart.Spec.SourceRef.Name
-	repoNamespace := rel.Spec.Chart.Spec.SourceRef.Namespace
-	chartName := rel.Spec.Chart.Spec.Chart
-
-	if repoName != "" && helmChartRef != "" && chartName != "" {
-		parts := strings.Split(helmChartRef, "/")
-		if len(parts) != 2 {
-			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Incorrect package ref dentifier, currently just 'foo/bar' patterns are supported: %s", helmChartRef))
-		} else {
-			chartKey := types.NamespacedName{Name: parts[1], Namespace: parts[0]}
-			// not important to use the chart cache here, since the tar URL will be from a local cluster
-			if chart, err := s.getChartInCluster(ctx, headers, chartKey); err != nil {
-				log.Warningf("Failed to get HelmChart [%s] due to: %+v", helmChartRef, err)
-			} else {
-				tarUrl := chart.Status.URL
-				if tarUrl == "" {
-					log.Warningf("Missing element status.url on HelmRelease [%s]", name)
-				} else {
-					chartID := fmt.Sprintf("%s/%s", repoName, chartName)
-					// fetch, unzip and untar .tgz file
-					// no need to provide authz, userAgent or any of the TLS details, as we are pulling .tgz file from
-					// local cluster, not remote repo.
-					// E.g. http://source-controller.flux-system.svc.cluster.local./helmchart/default/redis-j6wtx/redis-latest.tgz
-					// Flux does the hard work of pulling the bits from remote repo
-					// based on secretRef associated with HelmRepository, if applicable
-					chartDetail, err := tarutil.FetchChartDetailFromTarballUrl(tarUrl, "", "", httpclient.New())
-					if err != nil {
-						return nil, err
-					}
-					if pkgDetail, err = availablePackageDetailFromChartDetail(chartID, chartDetail); err != nil {
-						return nil, err
-					}
-				}
-			}
-		}
-	}
-
-	// according to flux docs repoNamespace is optional
-	if repoNamespace == "" {
-		repoNamespace = name.Namespace
-	}
-	repo := types.NamespacedName{Namespace: repoNamespace, Name: repoName}
-	chartFromCache, err := s.getChartModel(ctx, headers, repo, chartName)
-	if err != nil {
-		log.Warningf("%v", err)
-	} else if chartFromCache != nil && len(chartFromCache.ChartVersions) > 0 {
-		// charts in cache are already sorted with the latest being at position 0
-		latestPkgVersion = &corev1.PackageAppVersion{
-			PkgVersion: chartFromCache.ChartVersions[0].Version,
-			AppVersion: chartFromCache.ChartVersions[0].AppVersion,
-		}
-	}
+func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, rel *unstructured.Unstructured) (*corev1.InstalledPackageSummary, error) {
+	// Extract common fields from the custom resource
+	name := rel.GetName()
+	namespace := rel.GetNamespace()
+	version, _, _ := unstructured.NestedString(rel.Object, "appVersion")
 
 	return &corev1.InstalledPackageSummary{
 		InstalledPackageRef: &corev1.InstalledPackageReference{
 			Context: &corev1.Context{
-				Namespace: name.Namespace,
+				Namespace: namespace,
 				Cluster:   s.kubeappsCluster,
 			},
-			Identifier: name.Name,
+			Identifier: name,
 			Plugin:     GetPluginDetail(),
 		},
-		Name:                name.Name,
-		PkgVersionReference: pkgVersion,
-		CurrentVersion:      pkgDetail.GetVersion(),
-		IconUrl:             pkgDetail.GetIconUrl(),
-		PkgDisplayName:      pkgDetail.GetDisplayName(),
-		ShortDescription:    pkgDetail.GetShortDescription(),
-		Status:              installedPackageStatus(rel),
-		LatestVersion:       latestPkgVersion,
-		// TODO (gfichtenholt) LatestMatchingPkgVersion
-		// Only non-empty if an available upgrade matches the specified pkg_version_reference.
-		// For example, if the pkg_version_reference is ">10.3.0 < 10.4.0" and 10.3.1
-		// is installed, then:
-		//   * if 10.3.2 is available, latest_matching_version should be 10.3.2, but
-		//   * if 10.4 is available while >10.3.1 is not, this should remain empty.
-	}, nil
-}
-
-func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header, key types.NamespacedName) (*corev1.InstalledPackageDetail, error) {
-	rel, err := s.getReleaseInCluster(ctx, headers, key)
-	if err != nil {
-		return nil, err
-	}
-
-	log.V(4).Infof("Release from installedPackageDetail:\n[%s]", common.PrettyPrint(rel))
-
-	var pkgVersionRef *corev1.VersionReference
-	version := rel.Spec.Chart.Spec.Version
-	if version != "" {
-		pkgVersionRef = &corev1.VersionReference{
+		Name: name,
+		PkgVersionReference: &corev1.VersionReference{
 			Version: version,
-		}
-	}
-
-	var valuesApplied = ""
-	valuesJson := rel.Spec.Values
-	if valuesJson != nil {
-		valuesApplied = string(valuesJson.Raw)
-	}
-
-	// TODO (gfichtenholt) what about ValuesFrom []ValuesReference `json:"valuesFrom,omitempty"`?
-	// ValuesReference maybe a config map or a secret
-
-	// this will only be present if install/upgrade succeeded
-	// TODO(agamez): flux upgrade - migrate to Status.History, see https://github.com/fluxcd/flux2/releases/tag/v2.2.0
-	pkgVersion := rel.Status.LastAttemptedRevision
-
-	availablePackageRef, err := installedPackageAvailablePackageRef(rel)
-	if err != nil {
-		return nil, err
-	}
-	// per https://github.com/vmware-tanzu/kubeapps/pull/3686#issue-1038093832
-	availablePackageRef.Context.Cluster = s.kubeappsCluster
-
-	appVersion, postInstallNotes := "", ""
-	rel2, err := s.getReleaseViaHelmApi(headers, key, rel)
-	// err maybe NotFound if this object has just been created and flux hasn't had time
-	// to invoke helm layer yet
-	if err == nil && rel != nil {
-		// a couple of fields currently only available via helm API
-		if rel2.Chart != nil {
-			appVersion = rel2.Chart.AppVersion()
-		}
-		if rel2.Info != nil {
-			postInstallNotes = rel2.Info.Notes
-		}
-	} else if err != nil && !errors.IsNotFound(err) {
-		log.Warningf("Failed to get helm release due to %v", err)
-	}
-
-	return &corev1.InstalledPackageDetail{
-		InstalledPackageRef: &corev1.InstalledPackageReference{
-			Context: &corev1.Context{
-				Namespace: key.Namespace,
-				Cluster:   s.kubeappsCluster,
-			},
-			Identifier: key.Name,
-			Plugin:     GetPluginDetail(),
 		},
-		Name:                key.Name,
-		PkgVersionReference: pkgVersionRef,
-		CurrentVersion: &corev1.PackageAppVersion{
-			PkgVersion: pkgVersion,
-			AppVersion: appVersion,
-		},
-		ValuesApplied:         valuesApplied,
-		ReconciliationOptions: installedPackageReconciliationOptions(rel),
-		AvailablePackageRef:   availablePackageRef,
-		PostInstallationNotes: postInstallNotes,
-		Status:                installedPackageStatus(*rel),
+		Status: getResourceStatus(rel),
+		// Other fields like IconUrl, PkgDisplayName, etc. can be extracted from spec if available
 	}, nil
 }
 
-func (s *Server) getReleaseViaHelmApi(headers http.Header, key types.NamespacedName, rel *helmv2.HelmRelease) (*release.Release, error) {
-	// post installation notes can only be retrieved via helm APIs, flux doesn't do it
-	// see discussion in https://cloud-native.slack.com/archives/CLAJ40HV3/p1629244025187100
-	if s.actionConfigGetter == nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("Server is not configured with actionConfigGetter"))
-	}
+func getResourceStatus(obj *unstructured.Unstructured) *corev1.InstalledPackageStatus {
+	// Extract status from conditions if present
+	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 
-	helmRel := helmReleaseName(key, rel)
-	actionConfig, err := s.actionConfigGetter(headers, helmRel.Namespace)
-	if err != nil || actionConfig == nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Unable to create Helm action config in namespace [%s] due to: %v", key.Namespace, err))
-	}
-	cmd := action.NewGet(actionConfig)
-	release, err := cmd.Run(helmRel.Name)
-	if err != nil {
-		if err == driver.ErrReleaseNotFound {
-			return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Unable to find Helm release [%s] in namespace [%s]", helmRel, key.Namespace))
+	for _, c := range conditions {
+		condition, ok := c.(map[string]interface{})
+		if !ok {
+			continue
 		}
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Unable to run Helm Get action for release [%s] in namespace [%s]: %w", helmRel, key.Namespace, err))
-	}
-	return release, nil
-}
 
-func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef *corev1.AvailablePackageReference, targetName types.NamespacedName, versionRef *corev1.VersionReference, reconcile *corev1.ReconciliationOptions, valuesString string) (*corev1.InstalledPackageReference, error) {
-	repoName, chartName, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
-	if err != nil {
-		return nil, err
-	}
-
-	repo := types.NamespacedName{Namespace: packageRef.Context.Namespace, Name: repoName}
-	chart, err := s.getChartModel(ctx, headers, repo, chartName)
-	if err != nil {
-		return nil, err
-	}
-
-	var values map[string]interface{}
-	if valuesString != "" {
-		// maybe JSON or YAML
-		values = make(map[string]interface{})
-		if err = yaml.Unmarshal([]byte(valuesString), &values); err != nil {
-			return nil, err
-		}
-	}
-
-	// Calculate the version constraints
-	versionExpr := versionRef.GetVersion()
-	if versionExpr != "" {
-		versionExpr, err = pkgutils.VersionConstraintWithUpgradePolicy(
-			versionRef.GetVersion(), s.pluginConfig.DefaultUpgradePolicy)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	fluxRelease, err := s.newFluxHelmRelease(chart, targetName, versionExpr, reconcile, values)
-	if err != nil {
-		return nil, err
-	}
-
-	// per https://github.com/vmware-tanzu/kubeapps/pull/3640#issuecomment-949315105
-	// the helm release CR to also be created in the target namespace (where the helm
-	// release itself is currently created)
-	client, err := s.getClient(headers, targetName.Namespace)
-	if err != nil {
-		return nil, err
-	}
-
-	if err = client.Create(ctx, fluxRelease); err != nil {
-		return nil, connecterror.FromK8sError("create", "HelmRelease", targetName.String(), err)
-	}
-
-	return &corev1.InstalledPackageReference{
-		Context: &corev1.Context{
-			Namespace: targetName.Namespace,
-			Cluster:   s.kubeappsCluster,
-		},
-		Identifier: targetName.Name,
-		Plugin:     GetPluginDetail(),
-	}, nil
-}
-
-func (s *Server) updateRelease(ctx context.Context, headers http.Header, packageRef *corev1.InstalledPackageReference, versionRef *corev1.VersionReference, reconcile *corev1.ReconciliationOptions, valuesString string) (*corev1.InstalledPackageReference, error) {
-	key := types.NamespacedName{Name: packageRef.Identifier, Namespace: packageRef.Context.Namespace}
-
-	rel, err := s.getReleaseInCluster(ctx, headers, key)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO (gfichtenholt): there is an intermittent issue
-	// rpc error: code = Internal desc = unable to update the HelmRelease
-	// 'test-12-i7a4/my-podinfo-12' due to 'Operation cannot be fulfilled on
-	// helmreleases.helm.toolkit.fluxcd.io "my-podinfo-12": the object has been
-	// modified; please apply your changes to the latest version and try again'
-	// the problem is
-	//  1) we get a CR then
-	//  2) do some modifications of this CR
-	//  3) call Update() with this CR.
-	// Every once in a while there the CR gets updated (by flux) between (1) and (3)
-	// and we get this error.
-	// I think one way to fix it would be to implement a fixed number of retries in
-	// flux plugin with exponential back-off.
-	// Another solution might be to push the decision all the way to the end user to retry
-	// the Update operation
-
-	// As Michael and I agreed 4/12/2022, initially we'll disallow updates to pending releases
-	// to simplify the initial case, though we may implement support later. Updates to
-	// non-pending releases  (i.e. success or failed status) are allowed
-	_, reason, _ := isHelmReleaseReady(*rel)
-	if reason == corev1.InstalledPackageStatus_STATUS_REASON_PENDING {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Updates to helm releases pending reconciliation are not supported"))
-	}
-
-	versionExpr := versionRef.GetVersion()
-	if versionExpr != "" {
-		versionExpr, err = pkgutils.VersionConstraintWithUpgradePolicy(
-			versionRef.GetVersion(), s.pluginConfig.DefaultUpgradePolicy)
-		if err != nil {
-			return nil, err
-		}
-		rel.Spec.Chart.Spec.Version = versionExpr
-	} else {
-		rel.Spec.Chart.Spec.Version = ""
-	}
-
-	if valuesString != "" {
-		// could be JSON or YAML
-		var values map[string]interface{}
-		if err = yaml.Unmarshal([]byte(valuesString), &values); err != nil {
-			return nil, err
-		}
-		byteArray, err := json.Marshal(values)
-		if err != nil {
-			return nil, err
-		}
-		rel.Spec.Values = &v1.JSON{Raw: byteArray}
-	} else {
-		rel.Spec.Values = nil
-	}
-
-	setInterval, setServiceAccount := false, false
-	if reconcile != nil {
-		if reconcile.Interval != "" {
-			reconcileInterval, err := pkgutils.ToDuration(reconcile.Interval)
-			if err != nil {
-				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("The reconciliation interval is invalid: %w", err))
+		if status, ok := condition["status"].(string); ok {
+			if status == "True" {
+				return &corev1.InstalledPackageStatus{
+					Ready:      true,
+					Reason:     corev1.InstalledPackageStatus_STATUS_REASON_INSTALLED,
+					UserReason: fmt.Sprintf("%s is ready", obj.GetKind()),
+				}
 			}
-			rel.Spec.Interval = *reconcileInterval
-			setInterval = true
 		}
-		if reconcile.ServiceAccountName != "" {
-			rel.Spec.ServiceAccountName = reconcile.ServiceAccountName
-			setServiceAccount = true
-		}
-
-		rel.Spec.Suspend = reconcile.Suspend
 	}
 
-	if !setInterval {
-		// interval is a required field
-		rel.Spec.Interval = defaultReconcileInterval
+	return &corev1.InstalledPackageStatus{
+		Ready:      false,
+		Reason:     corev1.InstalledPackageStatus_STATUS_REASON_PENDING,
+		UserReason: fmt.Sprintf("%s is not ready", obj.GetKind()),
 	}
-	if !setServiceAccount {
-		rel.Spec.ServiceAccountName = ""
-	}
+}
 
-	// get rid of the status field, since now there will be a new reconciliation
-	// process and the current status no longer applies. metadata and spec I want
-	// to keep, as they may have had added labels and/or annotations and/or
-	// even other changes made by the user.
-	rel.Status = helmv2.HelmReleaseStatus{}
-
-	client, err := s.getClient(headers, packageRef.Context.Namespace)
+// newRelease creates a new custom resource instance
+func (s *Server) newRelease(ctx context.Context, packageRef *corev1.AvailablePackageReference, targetName types.NamespacedName, version *corev1.VersionReference, values string) (*corev1.InstalledPackageReference, error) {
+	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return nil, err
 	}
 
-	if err = client.Update(ctx, rel); err != nil {
-		return nil, connecterror.FromK8sError("update", "HelmRelease", key.String(), err)
+	// Create the custom resource
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": fmt.Sprintf("%s/%s", gvr.Group, gvr.Version),
+			"kind":       strings.Title(gvr.Resource[:len(gvr.Resource)-1]), // Remove trailing 's' and capitalize
+			"metadata": map[string]interface{}{
+				"name":      targetName.Name,
+				"namespace": targetName.Namespace,
+			},
+		},
 	}
 
-	log.V(4).Infof("Updated release: %s", common.PrettyPrint(rel))
+	// Parse and set values in spec
+	if values != "" {
+		var specValues map[string]interface{}
+		if err := json.Unmarshal([]byte(values), &specValues); err != nil {
+			return nil, fmt.Errorf("failed to parse values: %w", err)
+		}
+		obj.Object["spec"] = specValues
+	}
+
+	// Set version if provided
+	if version != nil && version.Version != "" {
+		obj.Object["appVersion"] = version.Version
+	}
+
+	// Create the resource
+	created, err := s.dynamicClient.Resource(gvr).Namespace(targetName.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+	if err != nil {
+		return nil, connecterror.FromK8sError("create", gvr.Resource, targetName.String(), err)
+	}
 
 	return &corev1.InstalledPackageReference{
 		Context: &corev1.Context{
-			Namespace: packageRef.Context.Namespace,
+			Namespace: created.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		Identifier: packageRef.Identifier,
+		Identifier: created.GetName(),
 		Plugin:     GetPluginDetail(),
 	}, nil
 }
 
-func (s *Server) deleteRelease(ctx context.Context, headers http.Header, packageRef *corev1.InstalledPackageReference) error {
-	client, err := s.getClient(headers, packageRef.Context.Namespace)
+// Helper function to get GroupVersionResource from package identifier
+func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResource, error) {
+	gvrs, err := s.getAvailableResourceTypes(context.Background())
+	if err != nil {
+		return schema.GroupVersionResource{}, err
+	}
+
+	// Package ID should match the resource type
+	for _, gvr := range gvrs {
+		if strings.HasPrefix(packageID, gvr.Resource+"/") {
+			return gvr, nil
+		}
+	}
+
+	return schema.GroupVersionResource{}, fmt.Errorf("no matching resource type found for package %s", packageID)
+}
+
+// updateRelease updates an existing custom resource instance
+func (s *Server) updateRelease(ctx context.Context, packageRef *corev1.InstalledPackageReference, version *corev1.VersionReference, values string) (*corev1.InstalledPackageReference, error) {
+	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get existing resource
+	existing, err := s.dynamicClient.Resource(gvr).Namespace(packageRef.Context.Namespace).Get(ctx, packageRef.Identifier, metav1.GetOptions{})
+	if err != nil {
+		return nil, connecterror.FromK8sError("get", gvr.Resource, packageRef.Identifier, err)
+	}
+
+	// Update spec if values provided
+	if values != "" {
+		var specValues map[string]interface{}
+		if err := json.Unmarshal([]byte(values), &specValues); err != nil {
+			return nil, fmt.Errorf("failed to parse values: %w", err)
+		}
+		existing.Object["spec"] = specValues
+	}
+
+	// Update version if provided
+	if version != nil && version.Version != "" {
+		existing.Object["appVersion"] = version.Version
+	}
+
+	// Update the resource
+	updated, err := s.dynamicClient.Resource(gvr).Namespace(packageRef.Context.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, connecterror.FromK8sError("update", gvr.Resource, packageRef.Identifier, err)
+	}
+
+	return &corev1.InstalledPackageReference{
+		Context: &corev1.Context{
+			Namespace: updated.GetNamespace(),
+			Cluster:   s.kubeappsCluster,
+		},
+		Identifier: updated.GetName(),
+		Plugin:     GetPluginDetail(),
+	}, nil
+}
+
+// deleteRelease deletes a custom resource instance
+func (s *Server) deleteRelease(ctx context.Context, packageRef *corev1.InstalledPackageReference) error {
+	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return err
 	}
 
-	log.V(4).Infof("Deleting release: [%s]", packageRef.Identifier)
-
-	rel := &helmv2.HelmRelease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      packageRef.Identifier,
-			Namespace: packageRef.Context.Namespace,
-		},
+	err = s.dynamicClient.Resource(gvr).Namespace(packageRef.Context.Namespace).Delete(ctx, packageRef.Identifier, metav1.DeleteOptions{})
+	if err != nil {
+		return connecterror.FromK8sError("delete", gvr.Resource, packageRef.Identifier, err)
 	}
 
-	if err = client.Delete(ctx, rel); err != nil {
-		return connecterror.FromK8sError("delete", "HelmRelease", packageRef.Identifier, err)
-	}
 	return nil
 }
 
-// Potentially, there are 3 different namespaces that can be specified here
-//  1. spec.chart.spec.sourceRef.namespace, where HelmRepository CRD object referenced exists
-//  2. metadata.namespace, where this HelmRelease CRD will exist, same as (3) below
-//     per https://github.com/vmware-tanzu/kubeapps/pull/3640#issuecomment-949315105
-//  3. spec.targetNamespace, where flux will install any artifacts from the release
-func (s *Server) newFluxHelmRelease(chart *models.Chart, targetName types.NamespacedName, versionExpr string, reconcile *corev1.ReconciliationOptions, values map[string]interface{}) (*helmv2.HelmRelease, error) {
-	fluxRelease := &helmv2.HelmRelease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      targetName.Name,
-			Namespace: targetName.Namespace,
-			Labels: map[string]string{
-				"cozystack.io/ui": "true",
-			},
-		},
-		Spec: helmv2.HelmReleaseSpec{
-			Chart: &helmv2.HelmChartTemplate{
-				Spec: helmv2.HelmChartTemplateSpec{
-					Chart: chart.Name,
-					SourceRef: helmv2.CrossNamespaceObjectReference{
-						Name:      chart.Repo.Name,
-						Kind:      sourcev1.HelmRepositoryKind,
-						Namespace: chart.Repo.Namespace,
+func (s *Server) installedPackageDetail(ctx context.Context, key types.NamespacedName) (*corev1.InstalledPackageDetail, error) {
+	// Get all available resource types
+	gvrs, err := s.getAvailableResourceTypes(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to find the resource in each type
+	for _, gvr := range gvrs {
+		obj, err := s.dynamicClient.Resource(gvr).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+		if err == nil {
+			// Found the resource
+			version, _, _ := unstructured.NestedString(obj.Object, "appVersion")
+			spec, _, _ := unstructured.NestedMap(obj.Object, "spec")
+			valuesJson, err := json.Marshal(spec)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal spec: %w", err)
+			}
+
+			return &corev1.InstalledPackageDetail{
+				InstalledPackageRef: &corev1.InstalledPackageReference{
+					Context: &corev1.Context{
+						Namespace: key.Namespace,
+						Cluster:   s.kubeappsCluster,
 					},
-					ReconcileStrategy: "Revision",
+					Identifier: key.Name,
+					Plugin:     GetPluginDetail(),
 				},
-			},
-		},
-	}
-	if versionExpr != "" {
-		fluxRelease.Spec.Chart.Spec.Version = versionExpr
-	}
-
-	reconcileInterval := defaultReconcileInterval // unless explicitly specified
-	if reconcile != nil {
-		if reconcile.Interval != "" {
-			if duration, err := pkgutils.ToDuration(reconcile.Interval); err != nil {
-				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("The reconciliation interval is invalid: %w", err))
-			} else {
-				reconcileInterval = *duration
-			}
-		}
-		fluxRelease.Spec.Suspend = reconcile.Suspend
-		if reconcile.ServiceAccountName != "" {
-			fluxRelease.Spec.ServiceAccountName = reconcile.ServiceAccountName
-		}
-	}
-	if values != nil {
-		byteArray, err := json.Marshal(values)
-		if err != nil {
-			return nil, err
-		}
-		fluxRelease.Spec.Values = &v1.JSON{Raw: byteArray}
-	}
-
-	// required fields, without which flux controller will fail to create the CRD
-	fluxRelease.Spec.Interval = reconcileInterval
-
-	// ref https://fluxcd.io/docs/components/helm/helmreleases/
-	// TODO (gfichtenholt) in theory, flux allows a timeout per release.
-	// So far we just use one configured per server/installation, if specified,
-	// same as helm plug-in.
-	// Otherwise the default timeout is used.
-	if s.pluginConfig.TimeoutSeconds > 0 {
-		timeoutInterval := metav1.Duration{Duration: time.Duration(s.pluginConfig.TimeoutSeconds) * time.Second}
-		fluxRelease.Spec.Timeout = &timeoutInterval
-	}
-	return fluxRelease, nil
-}
-
-// returns 3 things:
-// - ready:  whether the HelmRelease object is in a ready state
-// - reason: one of SUCCESS/FAILURE/PENDING/UNSPECIFIED,
-// - userReason: textual description of why the object is in current state, if present
-// docs:
-// 1. https://fluxcd.io/docs/components/helm/helmreleases/#examples
-// 2. discussion on private slack channel. Summary:
-//   - "ready" field: it's not indicating that the resource has completed (i.e. whether the task
-//     completed with install or failure), but rather just whether the resource is ready or not.
-//     So it can be false because of either a final state (failure) or a pending state
-//     (reconciliation in progress or whatever). That means the ready flag will only be set to true
-//     when install completes with success
-//   - "reason" field: failure only when flux returns "InstallFailed" reason
-//     otherwise pending or unspecified when there are no status conditions to go by
-func isHelmReleaseReady(rel helmv2.HelmRelease) (ready bool, status corev1.InstalledPackageStatus_StatusReason, userReason string) {
-	if !checkReleaseGeneration(rel) {
-		// according to https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-		// observedGeneration represents the .metadata.generation that the condition was set based upon.
-		// For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-		// with respect to the current state of the instance.
-		return false,
-			corev1.InstalledPackageStatus_STATUS_REASON_UNSPECIFIED,
-			"Flux HelmRelease resource is in a transient state"
-	}
-
-	isInstallFailed := false
-	readyCond := meta.FindStatusCondition(rel.GetConditions(), fluxmeta.ReadyCondition)
-
-	if readyCond != nil {
-		if readyCond.Reason != "" {
-			// this could be something like
-			//   "reason": "InstallFailed"
-			// i.e. not super useful
-			userReason = readyCond.Reason
-			if userReason == helmv2.InstallFailedReason ||
-				userReason == helmv2.UpgradeFailedReason {
-				isInstallFailed = true
-			}
-		}
-		if readyCond.Message != "" {
-			// whereas this could be something like:
-			// "message": 'Helm install failed: unable to build kubernetes objects from
-			// release manifest: error validating "": error validating data:
-			// ValidationError(Deployment.spec.replicas): invalid type for
-			// io.k8s.api.apps.v1.DeploymentSpec.replicas: got "string", expected "integer"'
-			// i.e. a little more useful, so we'll just return them both
-			userReason += ": " + readyCond.Message
-		}
-		if readyCond.Status == metav1.ConditionTrue {
-			return true, corev1.InstalledPackageStatus_STATUS_REASON_INSTALLED, userReason
-		} else if isInstallFailed {
-			return false, corev1.InstalledPackageStatus_STATUS_REASON_FAILED, userReason
+				Name: key.Name,
+				CurrentVersion: &corev1.PackageAppVersion{
+					PkgVersion: version,
+					AppVersion: version,
+				},
+				ValuesApplied: string(valuesJson),
+				Status:        getResourceStatus(obj),
+			}, nil
 		}
 	}
 
-	// catch all: unless we know something else, install is pending
-	return false, corev1.InstalledPackageStatus_STATUS_REASON_PENDING, userReason
-}
-
-func installedPackageStatus(rel helmv2.HelmRelease) *corev1.InstalledPackageStatus {
-	ready, reason, userReason := isHelmReleaseReady(rel)
-	return &corev1.InstalledPackageStatus{
-		Ready:      ready,
-		Reason:     reason,
-		UserReason: userReason,
-	}
-}
-
-func installedPackageReconciliationOptions(rel *helmv2.HelmRelease) *corev1.ReconciliationOptions {
-	reconciliationOptions := &corev1.ReconciliationOptions{}
-	reconciliationOptions.Interval = pkgutils.FromDuration(&rel.Spec.Interval)
-	reconciliationOptions.Suspend = rel.Spec.Suspend
-	reconciliationOptions.ServiceAccountName = rel.Spec.ServiceAccountName
-	return reconciliationOptions
-}
-
-func installedPackageAvailablePackageRef(rel *helmv2.HelmRelease) (*corev1.AvailablePackageReference, error) {
-	repoName := rel.Spec.Chart.Spec.SourceRef.Name
-	if repoName == "" {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Missing required field spec.chart.spec.sourceRef.name"))
-	}
-	chartName := rel.Spec.Chart.Spec.Chart
-	if chartName == "" {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Missing required field spec.chart.spec.chart"))
-	}
-	repoNamespace := rel.Spec.Chart.Spec.SourceRef.Namespace
-	// CrossNamespaceObjectReference namespace is optional, so
-	if repoNamespace == "" {
-		name, err := common.NamespacedName(rel)
-		if err != nil {
-			return nil, err
-		}
-		repoNamespace = name.Namespace
-	}
-	return &corev1.AvailablePackageReference{
-		Identifier: fmt.Sprintf("%s/%s", repoName, chartName),
-		Plugin:     GetPluginDetail(),
-		Context:    &corev1.Context{Namespace: repoNamespace},
-	}, nil
-}
-
-// ref https://fluxcd.io/docs/components/helm/helmreleases/
-func helmReleaseName(key types.NamespacedName, rel *helmv2.HelmRelease) types.NamespacedName {
-	helmReleaseName := rel.Spec.ReleaseName
-	// according to docs ReleaseName is optional and defaults to a composition of
-	// '[TargetNamespace-]Name'.
-	if helmReleaseName == "" {
-		// according to docs targetNamespace is optional and defaults to the namespace
-		// of the HelmRelease
-		if rel.Spec.TargetNamespace == "" {
-			helmReleaseName = key.Name
-		} else {
-			helmReleaseName = fmt.Sprintf("%s-%s", rel.Spec.TargetNamespace, key.Name)
-		}
-	}
-
-	helmReleaseNamespace := rel.Spec.TargetNamespace
-	if helmReleaseNamespace == "" {
-		helmReleaseNamespace = key.Namespace
-	}
-	return types.NamespacedName{Name: helmReleaseName, Namespace: helmReleaseNamespace}
-}
-
-func checkReleaseGeneration(rel helmv2.HelmRelease) bool {
-	generation := rel.GetGeneration()
-	observedGeneration := rel.Status.ObservedGeneration
-	return generation > 0 && generation == observedGeneration
+	return nil, fmt.Errorf("package not found: %s", key.String())
 }
