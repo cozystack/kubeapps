@@ -11,6 +11,7 @@ import (
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/fluxv2/packages/v1alpha1/common"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/connecterror"
+	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/pkgutils"
 	"sigs.k8s.io/yaml"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,7 +90,7 @@ func (s *Server) paginatedInstalledPkgSummaries(ctx context.Context, headers htt
 
 		for i, r := range releasesFromCluster {
 			if startAt <= i {
-				summary, err := s.installedPkgSummaryFromRelease(ctx, r)
+				summary, err := s.installedPkgSummaryFromRelease(ctx, headers, r)
 				if err != nil {
 					return nil, err
 				}
@@ -105,10 +106,41 @@ func (s *Server) paginatedInstalledPkgSummaries(ctx context.Context, headers htt
 	return summaries, nil
 }
 
-func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, rel *unstructured.Unstructured) (*corev1.InstalledPackageSummary, error) {
+func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers http.Header, rel *unstructured.Unstructured) (*corev1.InstalledPackageSummary, error) {
 	name := rel.GetName()
 	namespace := rel.GetNamespace()
 	version, _, _ := unstructured.NestedString(rel.Object, "appVersion")
+
+	// Найти соответствующий helm chart через конфигурацию
+	var resourceConfig *common.ConfigResource
+	for _, res := range s.pluginConfig.Resources {
+		if res.Application.Kind == rel.GetKind() {
+			resourceConfig = &res
+			break
+		}
+	}
+
+	if resourceConfig == nil {
+		return nil, fmt.Errorf("Resource config not found for kind: %s", rel.GetKind())
+	}
+
+	// Создаем ссылку на доступный пакет (helm chart)
+	availablePkgRef := &corev1.AvailablePackageReference{
+		Context: &corev1.Context{
+			Namespace: resourceConfig.Release.Chart.SourceRef.Namespace,
+			Cluster:   s.kubeappsCluster,
+		},
+		Identifier: fmt.Sprintf("%s/%s",
+			resourceConfig.Release.Chart.SourceRef.Name,
+			resourceConfig.Release.Chart.Name),
+		Plugin: GetPluginDetail(),
+	}
+
+	// Получаем детали helm chart'а
+	pkgDetail, err := s.getAvailablePackageDetail(ctx, headers, availablePkgRef)
+	if err != nil {
+		return nil, err
+	}
 
 	return &corev1.InstalledPackageSummary{
 		InstalledPackageRef: &corev1.InstalledPackageReference{
@@ -120,10 +152,43 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, rel *unstru
 			Plugin:     GetPluginDetail(),
 		},
 		Name: name,
-		PkgVersionReference: &corev1.VersionReference{
-			Version: version,
+		CurrentVersion: &corev1.PackageAppVersion{
+			PkgVersion: version,
+			AppVersion: version,
 		},
+		IconUrl:          pkgDetail.IconUrl,
+		PkgDisplayName:   pkgDetail.DisplayName,
+		ShortDescription: pkgDetail.ShortDescription,
+		// Add reference to available package
 		Status: getResourceStatus(rel),
+	}, nil
+}
+
+func (s *Server) getAvailablePackageDetail(ctx context.Context, headers http.Header, ref *corev1.AvailablePackageReference) (*corev1.AvailablePackageDetail, error) {
+	repoName, chartName, err := pkgutils.SplitPackageIdentifier(ref.Identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	repo := types.NamespacedName{Namespace: ref.Context.Namespace, Name: repoName}
+	chart, err := s.getChartModel(ctx, headers, repo, chartName)
+	if err != nil {
+		return nil, err
+	}
+
+	if chart == nil {
+		return nil, fmt.Errorf("chart not found")
+	}
+
+	return &corev1.AvailablePackageDetail{
+		Name:             chartName,
+		IconUrl:          chart.Icon,
+		DisplayName:      chart.Name,
+		ShortDescription: chart.Description,
+		Version: &corev1.PackageAppVersion{
+			PkgVersion: chart.ChartVersions[0].Version,    // TODO
+			AppVersion: chart.ChartVersions[0].AppVersion, // TODO
+		},
 	}, nil
 }
 
@@ -351,6 +416,29 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 				return nil, fmt.Errorf("failed to marshal spec: %w", err)
 			}
 
+			// Find the resource config
+			var resourceConfig *common.ConfigResource
+			for _, res := range s.pluginConfig.Resources {
+				if res.Application.Plural == gvr.Resource {
+					resourceConfig = &res
+					break
+				}
+			}
+			if resourceConfig == nil {
+				return nil, fmt.Errorf("resource config not found for %s", gvr.Resource)
+			}
+
+			availablePkgRef := &corev1.AvailablePackageReference{
+				Context: &corev1.Context{
+					Namespace: resourceConfig.Release.Chart.SourceRef.Namespace,
+					Cluster:   s.kubeappsCluster,
+				},
+				Identifier: fmt.Sprintf("%s/%s",
+					resourceConfig.Release.Chart.SourceRef.Name,
+					resourceConfig.Release.Chart.Name),
+				Plugin: GetPluginDetail(),
+			}
+
 			return &corev1.InstalledPackageDetail{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context: &corev1.Context{
@@ -365,8 +453,9 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 					PkgVersion: version,
 					AppVersion: version,
 				},
-				ValuesApplied: string(valuesJson),
-				Status:        getResourceStatus(obj),
+				AvailablePackageRef: availablePkgRef,
+				ValuesApplied:       string(valuesJson),
+				Status:              getResourceStatus(obj),
 			}, nil
 		}
 	}
