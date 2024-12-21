@@ -431,14 +431,32 @@ type FluxPluginConfig struct {
 	DefaultUpgradePolicy pkgutils.UpgradePolicy
 	// ref https://github.com/vmware-tanzu/kubeapps/issues/5541
 	NoCrossNamespaceRefs bool
+	Resources            []ConfigResource `json:"resources"`
+}
+
+type ConfigResource struct {
+	Application struct {
+		Kind     string `json:"kind"`
+		Singular string `json:"singular"`
+		Plural   string `json:"plural"`
+	} `json:"application"`
+	Release struct {
+		Prefix string            `json:"prefix"`
+		Labels map[string]string `json:"labels"`
+		Chart  struct {
+			Name      string `json:"name"`
+			SourceRef struct {
+				Kind      string `json:"kind"`
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"sourceRef"`
+		} `json:"chart"`
+	} `json:"release"`
 }
 
 // ParsePluginConfig parses the input plugin configuration json file and return the
 // configuration options.
 func ParsePluginConfig(pluginConfigPath string) (*FluxPluginConfig, error) {
-	// In the flux plugin, for example, we are interested in
-	// a) config for the core.packages.v1alpha1.
-	// b) flux plugin-specific config
 	type internalFluxPluginConfig struct {
 		Core struct {
 			Packages struct {
@@ -452,36 +470,61 @@ func ParsePluginConfig(pluginConfigPath string) (*FluxPluginConfig, error) {
 		Flux struct {
 			Packages struct {
 				V1alpha1 struct {
-					DefaultUpgradePolicy string `json:"defaultUpgradePolicy"`
-					NoCrossNamespaceRefs bool   `json:"noCrossNamespaceRefs"`
+					DefaultUpgradePolicy string           `json:"defaultUpgradePolicy"`
+					NoCrossNamespaceRefs bool             `json:"noCrossNamespaceRefs"`
+					Resources            []ConfigResource `json:"resources"` // Move resources here
 				} `json:"v1alpha1"`
 			} `json:"packages"`
 		} `json:"flux"`
 	}
+
 	var config internalFluxPluginConfig
 
-	// #nosec G304
 	pluginConfig, err := os.ReadFile(pluginConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to open plugin config at %q: %w", pluginConfigPath, err)
 	}
-	err = json.Unmarshal([]byte(pluginConfig), &config)
+
+	err = json.Unmarshal(pluginConfig, &config)
 	if err != nil {
 		return nil, fmt.Errorf("unable to unmarshal plugin config: %q error: %w", string(pluginConfig), err)
 	}
 
-	if defaultUpgradePolicy, err := pkgutils.UpgradePolicyFromString(
-		config.Flux.Packages.V1alpha1.DefaultUpgradePolicy); err != nil {
+	defaultUpgradePolicy, err := pkgutils.UpgradePolicyFromString(
+		config.Flux.Packages.V1alpha1.DefaultUpgradePolicy)
+	if err != nil {
 		return nil, err
-	} else {
-		// return configured value
-		return &FluxPluginConfig{
-			VersionsInSummary:    config.Core.Packages.V1alpha1.VersionsInSummary,
-			TimeoutSeconds:       config.Core.Packages.V1alpha1.TimeoutSeconds,
-			DefaultUpgradePolicy: defaultUpgradePolicy,
-			NoCrossNamespaceRefs: config.Flux.Packages.V1alpha1.NoCrossNamespaceRefs,
-		}, nil
 	}
+
+	// Return configured values including resources from the flux section
+	return &FluxPluginConfig{
+		VersionsInSummary:    config.Core.Packages.V1alpha1.VersionsInSummary,
+		TimeoutSeconds:       config.Core.Packages.V1alpha1.TimeoutSeconds,
+		DefaultUpgradePolicy: defaultUpgradePolicy,
+		NoCrossNamespaceRefs: config.Flux.Packages.V1alpha1.NoCrossNamespaceRefs,
+		Resources:            config.Flux.Packages.V1alpha1.Resources,
+	}, nil
+}
+
+// Helper function to find resource config by chart info
+func (c *FluxPluginConfig) FindResourceByChart(repoName string, chartName string) *ConfigResource {
+	for _, res := range c.Resources {
+		if res.Release.Chart.SourceRef.Name == repoName &&
+			res.Release.Chart.Name == chartName {
+			return &res
+		}
+	}
+	return nil
+}
+
+// Helper function to find resource config by kind
+func (c *FluxPluginConfig) FindResourceByKind(kind string) *ConfigResource {
+	for _, res := range c.Resources {
+		if res.Application.Kind == kind {
+			return &res
+		}
+	}
+	return nil
 }
 
 func GetRepositoriesGvr() schema.GroupVersionResource {

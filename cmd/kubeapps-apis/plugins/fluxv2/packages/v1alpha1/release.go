@@ -217,18 +217,24 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 }
 
 func (s *Server) getGVRFromPackageID(ctx context.Context, headers http.Header, packageID string) (schema.GroupVersionResource, error) {
-	gvrs, err := s.getAvailableResourceTypes(ctx, headers)
-	if err != nil {
-		return schema.GroupVersionResource{}, err
+	parts := strings.Split(packageID, "/")
+	if len(parts) != 2 {
+		return schema.GroupVersionResource{}, fmt.Errorf("invalid package ID format: %s", packageID)
+	}
+	repoName := parts[0]
+	chartName := parts[1]
+
+	// Find matching resource from config
+	resource := s.pluginConfig.FindResourceByChart(repoName, chartName)
+	if resource == nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("no matching resource type found for package %s/%s", repoName, chartName)
 	}
 
-	for _, gvr := range gvrs {
-		if strings.HasPrefix(packageID, gvr.Resource+"/") {
-			return gvr, nil
-		}
-	}
-
-	return schema.GroupVersionResource{}, fmt.Errorf("no matching resource type found for package %s", packageID)
+	return schema.GroupVersionResource{
+		Group:    "apps.cozystack.io",
+		Version:  "v1alpha1",
+		Resource: resource.Application.Plural,
+	}, nil
 }
 
 // updateRelease updates an existing custom resource instance
