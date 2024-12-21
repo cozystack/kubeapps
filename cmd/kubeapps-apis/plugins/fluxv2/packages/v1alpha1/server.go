@@ -354,6 +354,7 @@ func (s *Server) GetInstalledPackageSummaries(ctx context.Context, request *conn
 	pageSize := request.Msg.GetPaginationOptions().GetPageSize()
 	installedPkgSummaries, err := s.paginatedInstalledPkgSummaries(
 		ctx,
+		request.Header(),
 		request.Msg.GetContext().GetNamespace(),
 		pageSize,
 		itemOffset)
@@ -361,8 +362,6 @@ func (s *Server) GetInstalledPackageSummaries(ctx context.Context, request *conn
 		return nil, err
 	}
 
-	// Only return a next page token if the request was for pagination and
-	// the results are a full page.
 	nextPageToken := ""
 	if pageSize > 0 && len(installedPkgSummaries) == int(pageSize) {
 		nextPageToken = fmt.Sprintf("%d", itemOffset+int(pageSize))
@@ -384,7 +383,6 @@ func (s *Server) GetInstalledPackageDetail(ctx context.Context, request *connect
 	}
 
 	packageRef := request.Msg.InstalledPackageRef
-	// flux CRDs require a namespace, cluster-wide resources are not supported
 	if packageRef.Context == nil || len(packageRef.Context.Namespace) == 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("InstalledPackageReference is missing required 'namespace' field"))
 	}
@@ -395,7 +393,7 @@ func (s *Server) GetInstalledPackageDetail(ctx context.Context, request *connect
 	}
 
 	key := types.NamespacedName{Namespace: packageRef.Context.Namespace, Name: packageRef.Identifier}
-	pkgDetail, err := s.installedPackageDetail(ctx, key)
+	pkgDetail, err := s.installedPackageDetail(ctx, request.Header(), key)
 	if err != nil {
 		return nil, err
 	}
@@ -433,18 +431,20 @@ func (s *Server) CreateInstalledPackage(ctx context.Context, request *connect.Re
 
 	name := types.NamespacedName{Name: request.Msg.Name, Namespace: request.Msg.TargetContext.Namespace}
 
-	if installedRef, err := s.newRelease(
+	installedRef, err := s.newRelease(
 		ctx,
-		request.Msg.AvailablePackageRef,
+		request.Header(),
+		packageRef,
 		name,
 		request.Msg.PkgVersionReference,
-		request.Msg.Values); err != nil {
+		request.Msg.Values)
+	if err != nil {
 		return nil, err
-	} else {
-		return connect.NewResponse(&corev1.CreateInstalledPackageResponse{
-			InstalledPackageRef: installedRef,
-		}), nil
 	}
+
+	return connect.NewResponse(&corev1.CreateInstalledPackageResponse{
+		InstalledPackageRef: installedRef,
+	}), nil
 }
 
 // UpdateInstalledPackage updates an installed package based on the request.
@@ -461,17 +461,19 @@ func (s *Server) UpdateInstalledPackage(ctx context.Context, request *connect.Re
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("Not supported yet: request.installedPackageRef.Context.Cluster: [%v]", cluster))
 	}
 
-	if installedRef, err := s.updateRelease(
+	installedRef, err := s.updateRelease(
 		ctx,
+		request.Header(),
 		installedPackageRef,
 		request.Msg.PkgVersionReference,
-		request.Msg.Values); err != nil {
+		request.Msg.Values)
+	if err != nil {
 		return nil, err
-	} else {
-		return connect.NewResponse(&corev1.UpdateInstalledPackageResponse{
-			InstalledPackageRef: installedRef,
-		}), nil
 	}
+
+	return connect.NewResponse(&corev1.UpdateInstalledPackageResponse{
+		InstalledPackageRef: installedRef,
+	}), nil
 }
 
 // DeleteInstalledPackage deletes an installed package.
@@ -488,11 +490,12 @@ func (s *Server) DeleteInstalledPackage(ctx context.Context, request *connect.Re
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("Not supported yet: request.installedPackageRef.Context.Cluster: [%v]", cluster))
 	}
 
-	if err := s.deleteRelease(ctx, request.Msg.InstalledPackageRef); err != nil {
+	err := s.deleteRelease(ctx, request.Header(), request.Msg.InstalledPackageRef)
+	if err != nil {
 		return nil, err
-	} else {
-		return connect.NewResponse(&corev1.DeleteInstalledPackageResponse{}), nil
 	}
+
+	return connect.NewResponse(&corev1.DeleteInstalledPackageResponse{}), nil
 }
 
 // GetInstalledPackageResourceRefs returns the references for the Kubernetes
