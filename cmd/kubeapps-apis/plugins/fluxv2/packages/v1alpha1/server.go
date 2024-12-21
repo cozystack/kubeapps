@@ -35,8 +35,6 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/clientgetter"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
 
@@ -58,12 +56,6 @@ type Server struct {
 	// for interactions with k8s API server in the context of
 	// kubeapps-internal-kubeappsapis service account
 	serviceAccountClientGetter clientgetter.FixedClusterClientProviderInterface
-
-	// dynamicClient is used for interacting with dynamically discovered resources
-	dynamicClient dynamic.Interface
-
-	// discoveryClient is used for discovering available API resources
-	discoveryClient discovery.DiscoveryInterface
 
 	actionConfigGetter helm.HelmActionConfigGetterFunc
 
@@ -119,12 +111,6 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 		config.QPS = clientQPS
 		config.Burst = clientBurst
 
-		// Create dynamic client with service account config
-		dynamicClient, err := dynamic.NewForConfig(config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create dynamic client: %w", err)
-		}
-
 		s := repoEventSink{
 			clientGetter: backgroundClientGetter,
 			chartCache:   chartCache,
@@ -166,7 +152,6 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 			return &Server{
 				clientGetter:               clientProvider,
 				serviceAccountClientGetter: backgroundClientGetter,
-				dynamicClient:              dynamicClient,
 				actionConfigGetter:         helm.NewHelmActionConfigGetter(configGetter, kubeappsCluster),
 				repoCache:                  repoCache,
 				chartCache:                 chartCache,
@@ -530,8 +515,14 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 		Namespace:  namespace,
 	}}
 
+	// Get dynamic client with user auth
+	dynamicClient, err := s.clientGetter.Dynamic(request.Header(), s.kubeappsCluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
+	}
+
 	// Get the resource object
-	obj, err := s.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	obj, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, metav1.GetOptions{})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to get resource: %w", err))
 	}

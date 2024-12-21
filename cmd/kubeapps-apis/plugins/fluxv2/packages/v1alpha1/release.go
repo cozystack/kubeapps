@@ -156,6 +156,12 @@ func getResourceStatus(obj *unstructured.Unstructured) *corev1.InstalledPackageS
 
 // newRelease creates a new custom resource instance
 func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef *corev1.AvailablePackageReference, targetName types.NamespacedName, version *corev1.VersionReference, values string) (*corev1.InstalledPackageReference, error) {
+	// Get dynamic client with user auth
+	dynamicClient, err := s.clientGetter.Dynamic(headers, s.kubeappsCluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
+	}
+
 	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return nil, err
@@ -204,8 +210,8 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 		obj.Object["appVersion"] = version.Version
 	}
 
-	// Create the resource
-	created, err := s.dynamicClient.Resource(gvr).Namespace(targetName.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+	// Use the user's dynamic client to create the resource
+	created, err := dynamicClient.Resource(gvr).Namespace(targetName.Namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, connecterror.FromK8sError("create", gvr.Resource, targetName.String(), err)
 	}
@@ -215,7 +221,6 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 			Namespace: created.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		// Include resource type in identifier
 		Identifier: fmt.Sprintf("%s/%s", resourceConfig.Application.Kind, created.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
