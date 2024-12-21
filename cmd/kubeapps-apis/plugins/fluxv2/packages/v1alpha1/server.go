@@ -5,9 +5,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/bufbuild/connect-go"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/resources"
@@ -35,12 +35,9 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/clientgetter"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
 )
 
 // Compile-time statement to ensure this service implementation satisfies the core packaging API
@@ -128,12 +125,6 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 			return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 		}
 
-		// Create discovery client with service account config
-		discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create discovery client: %w", err)
-		}
-
 		s := repoEventSink{
 			clientGetter: backgroundClientGetter,
 			chartCache:   chartCache,
@@ -176,7 +167,6 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 				clientGetter:               clientProvider,
 				serviceAccountClientGetter: backgroundClientGetter,
 				dynamicClient:              dynamicClient,
-				discoveryClient:            discoveryClient,
 				actionConfigGetter:         helm.NewHelmActionConfigGetter(configGetter, kubeappsCluster),
 				repoCache:                  repoCache,
 				chartCache:                 chartCache,
@@ -504,73 +494,52 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 	pkgRef := request.Msg.GetInstalledPackageRef()
 	log.InfoS("+fluxv2 GetInstalledPackageResourceRefs", "cluster", pkgRef.GetContext().GetCluster(), "namespace", pkgRef.GetContext().GetNamespace(), "id", pkgRef.GetIdentifier())
 
-	// Getting dynamic client
-	dynamicClient, err := s.clientGetter.Dynamic(request.Header(), pkgRef.GetContext().GetCluster())
-	if err != nil {
-		log.Errorf("Failed to get dynamic client: %v", err)
-		return nil, err
+	// Split identifier to get resource type and name
+	parts := strings.Split(pkgRef.GetIdentifier(), "/")
+	if len(parts) != 2 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Invalid identifier format: %s", pkgRef.GetIdentifier()))
 	}
-
-	// Getting Discovery Client to work with RESTMapper
-	discoveryClient, err := s.clientGetter.Typed(request.Header(), pkgRef.GetContext().GetCluster())
-	if err != nil {
-		log.Errorf("Failed to create discovery client: %v", err)
-		return nil, err
-	}
-	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(discoveryClient.Discovery()))
-
-	// Getting the role
-	roleGVR := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}
-	roleName := fmt.Sprintf("%s-dashboard-resources", pkgRef.GetIdentifier())
+	resourceKind := parts[0]
+	resourceName := parts[1]
 	namespace := pkgRef.GetContext().GetNamespace()
-	role, err := dynamicClient.Resource(roleGVR).Namespace(namespace).Get(ctx, roleName, metav1.GetOptions{})
-	if err != nil {
-		log.Errorf("Failed to get role %s: %v", roleName, err)
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Unable to get role %s: %w", roleName, err))
-	}
 
-	// Logging Role content for debugging
-	roleContent, _ := json.Marshal(role)
-	log.Infof("Role content: %s", string(roleContent))
-
-	// Parsing rules from Role and creating ResourceRefs
-	resourcesFromRole := make([]*corev1.ResourceRef, 0)
-	rules, found, _ := unstructured.NestedSlice(role.Object, "rules")
-	if !found {
-		log.Errorf("No rules found in role %s", roleName)
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("No rules found in role %s", roleName))
-	}
-
-	for _, rule := range rules {
-		r := rule.(map[string]interface{})
-		resources, _ := r["resources"].([]interface{})
-		apiGroups, _ := r["apiGroups"].([]interface{})
-
-		for _, resource := range resources {
-			resourceStr := resource.(string)
-			for _, apiGroup := range apiGroups {
-				apiGroupStr := apiGroup.(string)
-
-				// Using GroupVersionResource to get GroupVersionKind
-				gvr := schema.GroupVersionResource{Group: apiGroupStr, Version: "v1", Resource: resourceStr}
-				gvk, err := mapper.KindFor(gvr)
-				if err != nil {
-					log.Errorf("Failed to get GroupVersionKind for GVR %v: %v", gvr, err)
-					continue
-				}
-
-				resourceNames, _ := r["resourceNames"].([]interface{})
-				for _, resourceName := range resourceNames {
-					resourceNameStr := resourceName.(string)
-					resourcesFromRole = append(resourcesFromRole, &corev1.ResourceRef{
-						ApiVersion: gvk.GroupVersion().String(),
-						Kind:       gvk.Kind,
-						Name:       resourceNameStr,
-						Namespace:  namespace,
-					})
-				}
-			}
+	// Find resource config
+	var resourceConfig *common.ConfigResource
+	for _, res := range s.pluginConfig.Resources {
+		if res.Application.Kind == resourceKind {
+			resourceConfig = &res
+			break
 		}
+	}
+	if resourceConfig == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Resource kind not found: %s", resourceKind))
+	}
+
+	// Get the resource to check its spec
+	gvr := schema.GroupVersionResource{
+		Group:    "apps.cozystack.io",
+		Version:  "v1alpha1",
+		Resource: resourceConfig.Application.Plural,
+	}
+
+	// Create base ResourceRef for the main resource
+	resourceRefs := []*corev1.ResourceRef{{
+		ApiVersion: fmt.Sprintf("%s/%s", gvr.Group, gvr.Version),
+		Kind:       resourceKind,
+		Name:       resourceName,
+		Namespace:  namespace,
+	}}
+
+	// Get the resource object
+	obj, err := s.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to get resource: %w", err))
+	}
+
+	// Extract references from spec
+	if spec, ok := obj.Object["spec"].(map[string]interface{}); ok {
+		// Recursively process spec looking for any references to other resources
+		s.processSpecForRefs(spec, namespace, resourceRefs)
 	}
 
 	return connect.NewResponse(&corev1.GetInstalledPackageResourceRefsResponse{
@@ -578,8 +547,44 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 			Cluster:   s.kubeappsCluster,
 			Namespace: namespace,
 		},
-		ResourceRefs: resourcesFromRole,
+		ResourceRefs: resourceRefs,
 	}), nil
+}
+
+// processSpecForRefs recursively processes a spec map looking for references to other resources
+func (s *Server) processSpecForRefs(spec map[string]interface{}, namespace string, refs []*corev1.ResourceRef) {
+	for key, value := range spec {
+		switch v := value.(type) {
+		case map[string]interface{}:
+			// Recursively process nested maps
+			s.processSpecForRefs(v, namespace, refs)
+		case []interface{}:
+			// Process arrays
+			for _, item := range v {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					s.processSpecForRefs(itemMap, namespace, refs)
+				}
+			}
+		case string:
+			// Check if the value looks like a resource reference
+			// You might want to customize this based on your naming conventions
+			if strings.Contains(key, "Name") || strings.HasSuffix(key, "Ref") {
+				// Look through all known resource types
+				for _, res := range s.pluginConfig.Resources {
+					prefix := res.Release.Prefix
+					if prefix != "" && strings.HasPrefix(v, prefix) {
+						refs = append(refs, &corev1.ResourceRef{
+							ApiVersion: "apps.cozystack.io/v1alpha1",
+							Kind:       res.Application.Kind,
+							Name:       v,
+							Namespace:  namespace,
+						})
+						break
+					}
+				}
+			}
+		}
+	}
 }
 
 func (s *Server) AddPackageRepository(ctx context.Context, request *connect.Request[corev1.AddPackageRepositoryRequest]) (*connect.Response[corev1.AddPackageRepositoryResponse], error) {

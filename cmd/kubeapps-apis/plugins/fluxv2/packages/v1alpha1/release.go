@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"strings"
 
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
+	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/fluxv2/packages/v1alpha1/common"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/connecterror"
+	"sigs.k8s.io/yaml"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -18,27 +21,16 @@ import (
 )
 
 // getAvailableResourceTypes returns a list of available custom resource types
-func (s *Server) getAvailableResourceTypes(ctx context.Context, headers http.Header) ([]schema.GroupVersionResource, error) {
-	// Get discovery client with user auth
-	discoveryClient, err := s.clientGetter.Typed(headers, s.kubeappsCluster)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get discovery client: %w", err)
-	}
-
-	resources, err := discoveryClient.Discovery().ServerResourcesForGroupVersion("apps.cozystack.io/v1alpha1")
-	if err != nil {
-		return nil, fmt.Errorf("failed to discover resources: %w", err)
-	}
-
+func (s *Server) getAvailableResourceTypes() []schema.GroupVersionResource {
 	var gvrs []schema.GroupVersionResource
-	for _, r := range resources.APIResources {
+	for _, r := range s.pluginConfig.Resources {
 		gvrs = append(gvrs, schema.GroupVersionResource{
 			Group:    "apps.cozystack.io",
 			Version:  "v1alpha1",
-			Resource: r.Name,
+			Resource: r.Application.Plural,
 		})
 	}
-	return gvrs, nil
+	return gvrs
 }
 
 // listReleasesInCluster returns all installed applications
@@ -51,10 +43,7 @@ func (s *Server) listReleasesInCluster(ctx context.Context, headers http.Header,
 		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
-	gvrs, err := s.getAvailableResourceTypes(ctx, headers)
-	if err != nil {
-		return nil, err
-	}
+	gvrs := s.getAvailableResourceTypes()
 
 	for _, gvr := range gvrs {
 		list, err := dynamicClient.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
@@ -167,21 +156,28 @@ func getResourceStatus(obj *unstructured.Unstructured) *corev1.InstalledPackageS
 
 // newRelease creates a new custom resource instance
 func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef *corev1.AvailablePackageReference, targetName types.NamespacedName, version *corev1.VersionReference, values string) (*corev1.InstalledPackageReference, error) {
-	// Get dynamic client with user auth
-	dynamicClient, err := s.clientGetter.Dynamic(headers, s.kubeappsCluster)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
-	}
-
-	gvr, err := s.getGVRFromPackageID(ctx, headers, packageRef.Identifier)
+	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return nil, err
 	}
 
+	// Find the resource config
+	var resourceConfig *common.ConfigResource
+	for _, res := range s.pluginConfig.Resources {
+		if res.Application.Plural == gvr.Resource {
+			resourceConfig = &res
+			break
+		}
+	}
+	if resourceConfig == nil {
+		return nil, fmt.Errorf("resource config not found for %s", gvr.Resource)
+	}
+
+	// Create the custom resource
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": fmt.Sprintf("%s/%s", gvr.Group, gvr.Version),
-			"kind":       strings.Title(gvr.Resource[:len(gvr.Resource)-1]),
+			"kind":       resourceConfig.Application.Kind,
 			"metadata": map[string]interface{}{
 				"name":      targetName.Name,
 				"namespace": targetName.Namespace,
@@ -189,19 +185,27 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 		},
 	}
 
+	// Parse and set values in spec
 	if values != "" {
 		var specValues map[string]interface{}
-		if err := json.Unmarshal([]byte(values), &specValues); err != nil {
-			return nil, fmt.Errorf("failed to parse values: %w", err)
+		// Remove comments before parsing
+		noComments := removeYAMLComments(values)
+		if err := json.Unmarshal([]byte(noComments), &specValues); err != nil {
+			// Try parsing as YAML if JSON fails
+			if err2 := yaml.Unmarshal([]byte(noComments), &specValues); err2 != nil {
+				return nil, fmt.Errorf("failed to parse values: %w", err)
+			}
 		}
 		obj.Object["spec"] = specValues
 	}
 
+	// Set version if provided
 	if version != nil && version.Version != "" {
 		obj.Object["appVersion"] = version.Version
 	}
 
-	created, err := dynamicClient.Resource(gvr).Namespace(targetName.Namespace).Create(ctx, obj, metav1.CreateOptions{})
+	// Create the resource
+	created, err := s.dynamicClient.Resource(gvr).Namespace(targetName.Namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, connecterror.FromK8sError("create", gvr.Resource, targetName.String(), err)
 	}
@@ -211,12 +215,30 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 			Namespace: created.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		Identifier: created.GetName(),
+		// Include resource type in identifier
+		Identifier: fmt.Sprintf("%s/%s", resourceConfig.Application.Kind, created.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
 }
 
-func (s *Server) getGVRFromPackageID(ctx context.Context, headers http.Header, packageID string) (schema.GroupVersionResource, error) {
+// Helper function to remove YAML comments
+func removeYAMLComments(input string) string {
+	var result strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.Index(line, "#"); idx != -1 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		if line != "" {
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+	}
+	return result.String()
+}
+
+func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResource, error) {
 	parts := strings.Split(packageID, "/")
 	if len(parts) != 2 {
 		return schema.GroupVersionResource{}, fmt.Errorf("invalid package ID format: %s", packageID)
@@ -225,16 +247,18 @@ func (s *Server) getGVRFromPackageID(ctx context.Context, headers http.Header, p
 	chartName := parts[1]
 
 	// Find matching resource from config
-	resource := s.pluginConfig.FindResourceByChart(repoName, chartName)
-	if resource == nil {
-		return schema.GroupVersionResource{}, fmt.Errorf("no matching resource type found for package %s/%s", repoName, chartName)
+	for _, res := range s.pluginConfig.Resources {
+		if res.Release.Chart.SourceRef.Name == repoName &&
+			res.Release.Chart.Name == chartName {
+			return schema.GroupVersionResource{
+				Group:    "apps.cozystack.io",
+				Version:  "v1alpha1",
+				Resource: res.Application.Plural,
+			}, nil
+		}
 	}
 
-	return schema.GroupVersionResource{
-		Group:    "apps.cozystack.io",
-		Version:  "v1alpha1",
-		Resource: resource.Application.Plural,
-	}, nil
+	return schema.GroupVersionResource{}, fmt.Errorf("no matching resource type found for package %s/%s", repoName, chartName)
 }
 
 // updateRelease updates an existing custom resource instance
@@ -245,7 +269,7 @@ func (s *Server) updateRelease(ctx context.Context, headers http.Header, package
 		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
-	gvr, err := s.getGVRFromPackageID(ctx, headers, packageRef.Identifier)
+	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +314,7 @@ func (s *Server) deleteRelease(ctx context.Context, headers http.Header, package
 		return fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
-	gvr, err := s.getGVRFromPackageID(ctx, headers, packageRef.Identifier)
+	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return err
 	}
@@ -310,10 +334,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
-	gvrs, err := s.getAvailableResourceTypes(ctx, headers)
-	if err != nil {
-		return nil, err
-	}
+	gvrs := s.getAvailableResourceTypes()
 
 	for _, gvr := range gvrs {
 		obj, err := dynamicClient.Resource(gvr).Namespace(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
