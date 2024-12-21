@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 )
 
@@ -108,12 +109,36 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 			log.Fatalf("%s", err)
 		}
 
+		// Create background client getter for service account operations
 		backgroundClientGetter := clientgetter.NewBackgroundClientProvider(clientgetter.Options{Scheme: scheme}, clientQPS, clientBurst)
+
+		// Get REST config directly using InClusterConfig
+		config, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
+		}
+
+		// Set QPS and burst
+		config.QPS = clientQPS
+		config.Burst = clientBurst
+
+		// Create dynamic client with service account config
+		dynamicClient, err := dynamic.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+		}
+
+		// Create discovery client with service account config
+		discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create discovery client: %w", err)
+		}
 
 		s := repoEventSink{
 			clientGetter: backgroundClientGetter,
 			chartCache:   chartCache,
 		}
+
 		repoCacheConfig := cache.NamespacedResourceWatcherCacheConfig{
 			Gvr:          common.GetRepositoriesGvr(),
 			ClientGetter: s.clientGetter,
@@ -138,22 +163,6 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 			},
 		}
 
-		// Create dynamic client
-		config, err := configGetter(http.Header{}, s.kubeappsCluster)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get config: %w", err)
-		}
-
-		dynamicClient, err := dynamic.NewForConfig(config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create dynamic client: %w", err)
-		}
-
-		discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create discovery client: %w", err)
-		}
-
 		if repoCache, err := cache.NewNamespacedResourceWatcherCache(
 			"repoCache", repoCacheConfig, redisCli, stopCh, false); err != nil {
 			return nil, err
@@ -168,12 +177,11 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 				serviceAccountClientGetter: backgroundClientGetter,
 				dynamicClient:              dynamicClient,
 				discoveryClient:            discoveryClient,
-				actionConfigGetter: helm.NewHelmActionConfigGetter(
-					configGetter, kubeappsCluster),
-				repoCache:       repoCache,
-				chartCache:      chartCache,
-				kubeappsCluster: kubeappsCluster,
-				pluginConfig:    pluginConfig,
+				actionConfigGetter:         helm.NewHelmActionConfigGetter(configGetter, kubeappsCluster),
+				repoCache:                  repoCache,
+				chartCache:                 chartCache,
+				kubeappsCluster:            kubeappsCluster,
+				pluginConfig:               pluginConfig,
 			}, nil
 		}
 	}
