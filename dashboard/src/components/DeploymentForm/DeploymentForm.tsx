@@ -131,7 +131,6 @@ export default function DeploymentForm() {
     setDeploying(true);
     if (selectedPackage.availablePackageDetail) {
       const deployed = await dispatch(
-        // Installation always happen in the cluster/namespace passed in the URL
         actions.installedpackages.installPackage(
           targetCluster || "",
           targetNamespace || "",
@@ -144,13 +143,16 @@ export default function DeploymentForm() {
       );
       setDeploying(false);
       if (deployed) {
+        // Get the chart name from packageId (last part after /)
+        const chartParts = packageId?.split("/") || [];
+        const chartName = chartParts[chartParts.length - 1]; // e.g. "redis" or "virtual-machine"
+  
         push(
-          // Redirect to the installed package, note that the cluster/ns are the ones passed
-          // in the URL, not the ones from the package.
           url.app.apps.get({
             context: { cluster: targetCluster, namespace: targetNamespace },
             plugin: pluginObj,
-            identifier: releaseName,
+            // Use chartName~releaseName format for the identifier
+            identifier: `${chartName}~${releaseName}`,
           } as AvailablePackageReference),
         );
       }

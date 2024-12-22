@@ -112,7 +112,7 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 	kind := rel.GetKind()
 	version, _, _ := unstructured.NestedString(rel.Object, "appVersion")
 
-	// Find the resource config
+	// Find resource config by kind
 	var resourceConfig *common.ConfigResource
 	for _, res := range s.pluginConfig.Resources {
 		if res.Application.Kind == kind {
@@ -120,12 +120,13 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 			break
 		}
 	}
-
 	if resourceConfig == nil {
 		return nil, fmt.Errorf("Resource config not found for kind: %s", kind)
 	}
 
-	// Create reference with kind included in identifier
+	// Create identifier using chart name
+	identifier := fmt.Sprintf("%s~%s", resourceConfig.Release.Chart.Name, name)
+
 	availablePkgRef := &corev1.AvailablePackageReference{
 		Context: &corev1.Context{
 			Namespace: resourceConfig.Release.Chart.SourceRef.Namespace,
@@ -137,14 +138,10 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 		Plugin: GetPluginDetail(),
 	}
 
-	// Get package details
 	pkgDetail, err := s.getAvailablePackageDetail(ctx, headers, availablePkgRef)
 	if err != nil {
 		return nil, err
 	}
-
-	// Create identifier using ~ as separator
-	identifier := fmt.Sprintf("%s~%s", kind, name)
 
 	return &corev1.InstalledPackageSummary{
 		InstalledPackageRef: &corev1.InstalledPackageReference{
@@ -230,21 +227,9 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
-	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
+	gvr, resourceConfig, err := s.getGVRFromPackageID(packageRef.Identifier)
 	if err != nil {
 		return nil, err
-	}
-
-	// Find the resource config
-	var resourceConfig *common.ConfigResource
-	for _, res := range s.pluginConfig.Resources {
-		if res.Application.Plural == gvr.Resource {
-			resourceConfig = &res
-			break
-		}
-	}
-	if resourceConfig == nil {
-		return nil, fmt.Errorf("resource config not found for %s", gvr.Resource)
 	}
 
 	// Create the custom resource
@@ -261,14 +246,11 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 
 	// Parse and set values in spec
 	if values != "" {
-		var specValues map[string]interface{}
 		// Remove comments before parsing
 		noComments := removeYAMLComments(values)
-		if err := json.Unmarshal([]byte(noComments), &specValues); err != nil {
-			// Try parsing as YAML if JSON fails
-			if err2 := yaml.Unmarshal([]byte(noComments), &specValues); err2 != nil {
-				return nil, fmt.Errorf("failed to parse values: %w", err)
-			}
+		var specValues map[string]interface{}
+		if err := yaml.Unmarshal([]byte(noComments), &specValues); err != nil {
+			return nil, fmt.Errorf("failed to parse values: %w", err)
 		}
 		obj.Object["spec"] = specValues
 	}
@@ -278,18 +260,19 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 		obj.Object["appVersion"] = version.Version
 	}
 
-	// Use the user's dynamic client to create the resource
+	// Create the resource
 	created, err := dynamicClient.Resource(gvr).Namespace(targetName.Namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		return nil, connecterror.FromK8sError("create", gvr.Resource, targetName.String(), err)
 	}
 
+	// Return reference using chart name from config
 	return &corev1.InstalledPackageReference{
 		Context: &corev1.Context{
 			Namespace: created.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		Identifier: fmt.Sprintf("%s/%s", resourceConfig.Application.Kind, created.GetName()),
+		Identifier: fmt.Sprintf("%s~%s", resourceConfig.Release.Chart.Name, created.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
 }
@@ -311,15 +294,15 @@ func removeYAMLComments(input string) string {
 	return result.String()
 }
 
-func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResource, error) {
+func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResource, *common.ConfigResource, error) {
 	parts := strings.Split(packageID, "/")
 	if len(parts) != 2 {
-		return schema.GroupVersionResource{}, fmt.Errorf("invalid package ID format: %s", packageID)
+		return schema.GroupVersionResource{}, nil, fmt.Errorf("invalid package ID format: %s", packageID)
 	}
 	repoName := parts[0]
 	chartName := parts[1]
 
-	// Find matching resource from config
+	// Find matching resource from config based on chart name
 	for _, res := range s.pluginConfig.Resources {
 		if res.Release.Chart.SourceRef.Name == repoName &&
 			res.Release.Chart.Name == chartName {
@@ -327,46 +310,78 @@ func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResou
 				Group:    "apps.cozystack.io",
 				Version:  "v1alpha1",
 				Resource: res.Application.Plural,
-			}, nil
+			}, &res, nil
 		}
 	}
 
-	return schema.GroupVersionResource{}, fmt.Errorf("no matching resource type found for package %s/%s", repoName, chartName)
+	return schema.GroupVersionResource{}, nil, fmt.Errorf("no matching resource type found for package %s/%s", repoName, chartName)
 }
 
 // updateRelease updates an existing custom resource instance
 func (s *Server) updateRelease(ctx context.Context, headers http.Header, packageRef *corev1.InstalledPackageReference, version *corev1.VersionReference, values string) (*corev1.InstalledPackageReference, error) {
-	// Get dynamic client with user auth
+	// Split identifier to get kind and name
+	parts := strings.Split(packageRef.Identifier, "~")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid identifier format: %s", packageRef.Identifier)
+	}
+	kind := parts[0]
+	name := parts[1]
+
+	// Find resource config
+	var resourceConfig *common.ConfigResource
+	for _, res := range s.pluginConfig.Resources {
+		if res.Application.Kind == kind {
+			resourceConfig = &res
+			break
+		}
+	}
+	if resourceConfig == nil {
+		return nil, fmt.Errorf("resource config not found for kind: %s", kind)
+	}
+
+	// Get GVR
+	gvr := schema.GroupVersionResource{
+		Group:    "apps.cozystack.io",
+		Version:  "v1alpha1",
+		Resource: resourceConfig.Application.Plural,
+	}
+
+	// Get dynamic client
 	dynamicClient, err := s.clientGetter.Dynamic(headers, s.kubeappsCluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
-	gvr, err := s.getGVRFromPackageID(packageRef.Identifier)
+	// Get existing resource
+	existing, err := dynamicClient.Resource(gvr).Namespace(packageRef.Context.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return nil, connecterror.FromK8sError("get", gvr.Resource, name, err)
 	}
 
-	existing, err := dynamicClient.Resource(gvr).Namespace(packageRef.Context.Namespace).Get(ctx, packageRef.Identifier, metav1.GetOptions{})
-	if err != nil {
-		return nil, connecterror.FromK8sError("get", gvr.Resource, packageRef.Identifier, err)
-	}
-
+	// Update values if provided
 	if values != "" {
+		// Remove comments before parsing
+		noComments := removeYAMLComments(values)
 		var specValues map[string]interface{}
-		if err := json.Unmarshal([]byte(values), &specValues); err != nil {
-			return nil, fmt.Errorf("failed to parse values: %w", err)
+		// Try parsing as YAML first
+		if err := yaml.Unmarshal([]byte(noComments), &specValues); err != nil {
+			// If YAML fails, try JSON
+			if err2 := json.Unmarshal([]byte(noComments), &specValues); err2 != nil {
+				return nil, fmt.Errorf("failed to parse values: %w", err)
+			}
 		}
 		existing.Object["spec"] = specValues
 	}
 
+	// Update version if provided
 	if version != nil && version.Version != "" {
 		existing.Object["appVersion"] = version.Version
 	}
 
+	// Update the resource
 	updated, err := dynamicClient.Resource(gvr).Namespace(packageRef.Context.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	if err != nil {
-		return nil, connecterror.FromK8sError("update", gvr.Resource, packageRef.Identifier, err)
+		return nil, connecterror.FromK8sError("update", gvr.Resource, name, err)
 	}
 
 	return &corev1.InstalledPackageReference{
@@ -374,7 +389,7 @@ func (s *Server) updateRelease(ctx context.Context, headers http.Header, package
 			Namespace: updated.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		Identifier: updated.GetName(),
+		Identifier: fmt.Sprintf("%s~%s", kind, updated.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
 }
@@ -424,37 +439,37 @@ func (s *Server) deleteRelease(ctx context.Context, headers http.Header, package
 }
 
 func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header, key types.NamespacedName) (*corev1.InstalledPackageDetail, error) {
-	// Split the identifier to get kind and name
+	// Split the key name to get chart name and resource name
 	parts := strings.Split(key.Name, "~")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid identifier format: %s", key.Name)
+		return nil, fmt.Errorf("invalid identifier format: %s, expected ChartName~Name", key.Name)
 	}
-	kind := parts[0]
+	chartName := parts[0]
 	name := parts[1]
 
-	// Get dynamic client with user auth
-	dynamicClient, err := s.clientGetter.Dynamic(headers, s.kubeappsCluster)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
-	}
-
-	// Find the resource config for the kind
+	// Find the resource config by chart name
 	var resourceConfig *common.ConfigResource
 	for _, res := range s.pluginConfig.Resources {
-		if res.Application.Kind == kind {
+		if res.Release.Chart.Name == chartName {
 			resourceConfig = &res
 			break
 		}
 	}
 	if resourceConfig == nil {
-		return nil, fmt.Errorf("resource config not found for kind: %s", kind)
+		return nil, fmt.Errorf("resource config not found for chart: %s", chartName)
 	}
 
-	// Get the GVR for the resource type
+	// Get GVR
 	gvr := schema.GroupVersionResource{
 		Group:    "apps.cozystack.io",
 		Version:  "v1alpha1",
 		Resource: resourceConfig.Application.Plural,
+	}
+
+	// Get dynamic client
+	dynamicClient, err := s.clientGetter.Dynamic(headers, s.kubeappsCluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
 	}
 
 	// Get the resource
@@ -487,7 +502,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 				Namespace: key.Namespace,
 				Cluster:   s.kubeappsCluster,
 			},
-			Identifier: fmt.Sprintf("%s~%s", kind, name),
+			Identifier: fmt.Sprintf("%s~%s", chartName, name),
 			Plugin:     GetPluginDetail(),
 		},
 		Name: name,
