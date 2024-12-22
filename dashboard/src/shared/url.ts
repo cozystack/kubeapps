@@ -36,7 +36,7 @@ export const app = {
       return `${app.apps.list(
         pkgCluster,
         pkgNamespace,
-      )}/${pkgPluginName}/${pkgPluginVersion}/${pkgId}`;
+      )}/${pkgPluginName}/${pkgPluginVersion}/${encodeURIComponent(pkgId)}`;
     },
     upgrade: (ref: InstalledPackageReference) => `${app.apps.get(ref)}/upgrade`,
     upgradeTo: (ref: InstalledPackageReference, version?: string) =>

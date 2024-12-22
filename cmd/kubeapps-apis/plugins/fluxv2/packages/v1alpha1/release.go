@@ -125,7 +125,7 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 	}
 
 	// Create identifier using chart name
-	identifier := fmt.Sprintf("%s~%s", resourceConfig.Release.Chart.Name, name)
+	identifier := fmt.Sprintf("%s/%s", resourceConfig.Release.Chart.Name, name)
 
 	availablePkgRef := &corev1.AvailablePackageReference{
 		Context: &corev1.Context{
@@ -272,7 +272,7 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 			Namespace: created.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		Identifier: fmt.Sprintf("%s~%s", resourceConfig.Release.Chart.Name, created.GetName()),
+		Identifier: fmt.Sprintf("%s/%s", resourceConfig.Release.Chart.Name, created.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
 }
@@ -320,7 +320,7 @@ func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResou
 // updateRelease updates an existing custom resource instance
 func (s *Server) updateRelease(ctx context.Context, headers http.Header, packageRef *corev1.InstalledPackageReference, version *corev1.VersionReference, values string) (*corev1.InstalledPackageReference, error) {
 	// Split identifier to get kind and name
-	parts := strings.Split(packageRef.Identifier, "~")
+	parts := strings.Split(packageRef.Identifier, "/")
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid identifier format: %s", packageRef.Identifier)
 	}
@@ -389,7 +389,7 @@ func (s *Server) updateRelease(ctx context.Context, headers http.Header, package
 			Namespace: updated.GetNamespace(),
 			Cluster:   s.kubeappsCluster,
 		},
-		Identifier: fmt.Sprintf("%s~%s", kind, updated.GetName()),
+		Identifier: fmt.Sprintf("%s/%s", kind, updated.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
 }
@@ -397,7 +397,7 @@ func (s *Server) updateRelease(ctx context.Context, headers http.Header, package
 // deleteRelease deletes a custom resource instance
 func (s *Server) deleteRelease(ctx context.Context, headers http.Header, packageRef *corev1.InstalledPackageReference) error {
 	// Split identifier to get kind and name
-	parts := strings.Split(packageRef.Identifier, "~")
+	parts := strings.Split(packageRef.Identifier, "/")
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid identifier format: %s", packageRef.Identifier)
 	}
@@ -440,9 +440,9 @@ func (s *Server) deleteRelease(ctx context.Context, headers http.Header, package
 
 func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header, key types.NamespacedName) (*corev1.InstalledPackageDetail, error) {
 	// Split the key name to get chart name and resource name
-	parts := strings.Split(key.Name, "~")
+	parts := strings.Split(key.Name, "/")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid identifier format: %s, expected ChartName~Name", key.Name)
+		return nil, fmt.Errorf("invalid identifier format: %s, expected ChartName/Name", key.Name)
 	}
 	chartName := parts[0]
 	name := parts[1]
@@ -502,7 +502,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 				Namespace: key.Namespace,
 				Cluster:   s.kubeappsCluster,
 			},
-			Identifier: fmt.Sprintf("%s~%s", chartName, name),
+			Identifier: fmt.Sprintf("%s/%s", chartName, name),
 			Plugin:     GetPluginDetail(),
 		},
 		Name: name,
