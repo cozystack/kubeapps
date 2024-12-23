@@ -214,7 +214,7 @@ func (s *Server) GetAvailablePackageSummaries(ctx context.Context, request *conn
 
 	// Modify packageSummaries to use Kind instead of chart name
 	summaries := make([]*corev1.AvailablePackageSummary, 0)
-	for repoName, packages := range charts {
+	for _, packages := range charts {
 		for _, chart := range packages {
 			if !passesFilter(chart, request.Msg.GetFilterOptions()) {
 				continue
@@ -233,7 +233,7 @@ func (s *Server) GetAvailablePackageSummaries(ctx context.Context, request *conn
 			}
 
 			// Update identifier to use Kind
-			pkg.AvailablePackageRef.Identifier = fmt.Sprintf("%s/%s", repoName, kind)
+			pkg.AvailablePackageRef.Identifier = fmt.Sprintf("%s/%s", chart.Repo.Name, kind)
 			pkg.Name = kind
 			pkg.DisplayName = kind
 
