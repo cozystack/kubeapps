@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/bufbuild/connect-go"
-	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/fluxv2/packages/v1alpha1/common"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/connecterror"
@@ -19,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	log "k8s.io/klog/v2"
+	"sigs.k8s.io/yaml"
 )
 
 // getAvailableResourceTypes returns a list of available custom resource types
@@ -270,10 +270,15 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 
 	// Set values if provided
 	if values != "" {
+		// Remove comments before parsing
+		noComments := removeYAMLComments(values)
 		var specValues map[string]interface{}
-		if err := json.Unmarshal([]byte(values), &specValues); err != nil {
-			return nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("Invalid values: %w", err))
+		// Try parsing as JSON first
+		if err := json.Unmarshal([]byte(noComments), &specValues); err != nil {
+			// If JSON parsing fails, try YAML
+			if err2 := yaml.Unmarshal([]byte(noComments), &specValues); err2 != nil {
+				return nil, fmt.Errorf("failed to parse values: %w", err)
+			}
 		}
 		obj.Object["spec"] = specValues
 	}
@@ -402,10 +407,15 @@ func (s *Server) updateRelease(ctx context.Context, headers http.Header, install
 
 	// Update values if specified
 	if values != "" {
+		// Remove comments before parsing
+		noComments := removeYAMLComments(values)
 		var specValues map[string]interface{}
-		if err := json.Unmarshal([]byte(values), &specValues); err != nil {
-			return nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("Invalid values: %w", err))
+		// Try parsing as JSON first
+		if err := json.Unmarshal([]byte(noComments), &specValues); err != nil {
+			// If JSON parsing fails, try YAML
+			if err2 := yaml.Unmarshal([]byte(noComments), &specValues); err2 != nil {
+				return nil, fmt.Errorf("failed to parse values: %w", err)
+			}
 		}
 		obj.Object["spec"] = specValues
 	}
@@ -455,18 +465,20 @@ func (s *Server) deleteRelease(ctx context.Context, headers http.Header, install
 		return err
 	}
 
-	helmRelease := &helmv2.HelmRelease{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       kind,
-			APIVersion: "apps.cozystack.io/v1alpha1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: key.Namespace,
+	// Create the resource
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps.cozystack.io/v1alpha1",
+			"kind":       kind,
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": key.Namespace,
+			},
+			"spec": make(map[string]interface{}),
 		},
 	}
 
-	if err = client.Delete(ctx, helmRelease); err != nil {
+	if err = client.Delete(ctx, obj); err != nil {
 		return connecterror.FromK8sError("delete", kind, key.String(), err)
 	}
 
