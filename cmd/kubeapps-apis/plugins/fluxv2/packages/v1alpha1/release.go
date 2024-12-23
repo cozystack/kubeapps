@@ -525,7 +525,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 		return nil, connecterror.FromK8sError("get", gvr.Resource, name, err)
 	}
 
-	version, _, _ := unstructured.NestedString(obj.Object, "appVersion")
+	version, _, _ := unstructured.NestedString(obj.Object, "status", "version")
 	spec, _, _ := unstructured.NestedMap(obj.Object, "spec")
 	valuesJson, err := json.Marshal(spec)
 	if err != nil {

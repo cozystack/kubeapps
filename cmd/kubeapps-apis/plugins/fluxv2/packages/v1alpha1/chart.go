@@ -171,12 +171,13 @@ func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, 
 	}
 
 	// Fix up package references to use Kind
+	pkgDetail.Name = kind
+	pkgDetail.DisplayName = kind
 	pkgDetail.AvailablePackageRef = &corev1.AvailablePackageReference{
 		Context: &corev1.Context{
 			Namespace: packageRef.Context.Namespace,
 			Cluster:   s.kubeappsCluster,
 		},
-		Plugin:     GetPluginDetail(),
 		Identifier: fmt.Sprintf("%s/%s", repo.Name, kind),
 	}
 

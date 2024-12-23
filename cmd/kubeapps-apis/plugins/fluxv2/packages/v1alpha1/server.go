@@ -234,6 +234,9 @@ func (s *Server) GetAvailablePackageSummaries(ctx context.Context, request *conn
 
 			// Update identifier to use Kind
 			pkg.AvailablePackageRef.Identifier = fmt.Sprintf("%s/%s", repoName, kind)
+			pkg.Name = kind
+			pkg.DisplayName = kind
+
 			summaries = append(summaries, pkg)
 
 			if pageSize > 0 && len(summaries) == int(pageSize) {
