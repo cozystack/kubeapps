@@ -39,41 +39,89 @@ func (s *Server) getChartInCluster(ctx context.Context, headers http.Header, key
 	return &chartObj, nil
 }
 
+// Helper functions for Kind-based package management
+func findKindByChartName(config *common.FluxPluginConfig, chartName string) (string, error) {
+	for _, res := range config.Resources {
+		if res.Release.Chart.Name == chartName {
+			return res.Application.Kind, nil
+		}
+	}
+	return "", fmt.Errorf("no Kind found for chart: %s", chartName)
+}
+
+func findChartNameByKind(config *common.FluxPluginConfig, kind string) (string, error) {
+	for _, res := range config.Resources {
+		if res.Application.Kind == kind {
+			return res.Release.Chart.Name, nil
+		}
+	}
+	return "", fmt.Errorf("no chart found for Kind: %s", kind)
+}
+
 // TODO (gfichtenholt) this func is too long. Break it up
 func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, packageRef *corev1.AvailablePackageReference, chartVersion string) (*corev1.AvailablePackageDetail, error) {
 	log.Infof("+availableChartDetail(%s, %s)", packageRef, chartVersion)
 
-	repoN, chartName, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
+	repoName, kindLower, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	log.Infof("Split identifier - repo: [%s], kind: [%s]", repoName, kindLower)
 
-	// check specified repo exists and is in ready state
-	repoName := types.NamespacedName{Namespace: packageRef.Context.Namespace, Name: repoN}
+	// Find resource config by case-insensitive comparison
+	var resourceConfig *common.ConfigResource
+	var kind string
+	for _, res := range s.pluginConfig.Resources {
+		if strings.EqualFold(res.Application.Kind, kindLower) {
+			resourceConfig = &res
+			kind = res.Application.Kind // Use the properly cased Kind from config
+			break
+		}
+	}
+	if resourceConfig == nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Resource config not found for Kind: %s", kindLower))
+	}
+	log.Infof("Found resource config for kind [%s], chart name: [%s]", kind, resourceConfig.Release.Chart.Name)
 
-	// this verifies that the repo exists
-	repo, err := s.getRepoInCluster(ctx, headers, repoName)
+	// Get chart name from config
+	chartName := resourceConfig.Release.Chart.Name
+
+	// Use repository from config
+	repo := types.NamespacedName{
+		Namespace: resourceConfig.Release.Chart.SourceRef.Namespace,
+		Name:      resourceConfig.Release.Chart.SourceRef.Name,
+	}
+	log.Infof("Using repo from config: [%s/%s]", repo.Namespace, repo.Name)
+
+	// Get the repository
+	repoObj, err := s.getRepoInCluster(ctx, headers, repo)
 	if err != nil {
 		return nil, err
-	} else if !isRepoReady(*repo) {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Repository [%s] is not in Ready state", repoName))
+	} else if !isRepoReady(*repoObj) {
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Repository [%s] is not in Ready state", repo))
 	}
 
-	chartID := fmt.Sprintf("%s/%s", repoName.Name, chartName)
-	// first, try the happy path - we have the chart version and the corresponding entry
-	// happens to be in the cache
+	// Use chartName instead of Kind for cache key since chart files are stored by chart name
+	chartID := fmt.Sprintf("%s/%s", repo.Name, chartName)
+	log.Infof("Using chart ID for cache: [%s]", chartID)
+
+	// Try cache first
 	var byteArray []byte
 	if chartVersion != "" {
-		if key, err := s.chartCache.KeyFor(repoName.Namespace, chartID, chartVersion); err != nil {
+		if key, err := s.chartCache.KeyFor(repo.Namespace, chartID, chartVersion); err != nil {
 			return nil, err
-		} else if byteArray, err = s.chartCache.Fetch(key); err != nil {
-			return nil, err
+		} else {
+			log.Infof("Looking up cache key: [%s]", key)
+			if byteArray, err = s.chartCache.Fetch(key); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	if byteArray == nil {
-		// no specific chart version was provided or a cache miss, need to do a bit of work
-		chartModel, err := s.getChartModel(ctx, headers, repoName, chartName)
+		log.Info("Cache miss or no version specified, fetching chart model")
+		// Get chart model
+		chartModel, err := s.getChartModel(ctx, headers, repo, chartName)
 		if err != nil {
 			return nil, err
 		} else if chartModel == nil {
@@ -82,22 +130,24 @@ func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, 
 
 		if chartVersion == "" {
 			chartVersion = chartModel.ChartVersions[0].Version
+			log.Infof("Using default version: [%s]", chartVersion)
 		}
 
 		var key string
-		if key, err = s.chartCache.KeyFor(repoName.Namespace, chartID, chartVersion); err != nil {
+		if key, err = s.chartCache.KeyFor(repo.Namespace, chartID, chartVersion); err != nil {
 			return nil, err
 		}
+		log.Infof("Cache key for download: [%s]", key)
 
 		var fn cache.DownloadChartFn
 		if chartModel.Repo.Type == "oci" {
-			if ociRepo, err := s.newOCIChartRepositoryAndLogin(ctx, *repo); err != nil {
+			if ociRepo, err := s.newOCIChartRepositoryAndLogin(ctx, *repoObj); err != nil {
 				return nil, err
 			} else {
 				fn = downloadOCIChartFn(ociRepo)
 			}
 		} else {
-			if opts, err := s.httpClientOptionsForRepo(ctx, headers, repoName); err != nil {
+			if opts, err := s.httpClientOptionsForRepo(ctx, headers, repo); err != nil {
 				return nil, err
 			} else {
 				fn = downloadHttpChartFn(opts)
@@ -122,16 +172,22 @@ func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, 
 		return nil, err
 	}
 
-	// fix up a couple of fields that don't come from the chart tarball
-	repoUrl := repo.Spec.URL
-	if repoUrl == "" {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Missing required field spec.url on repository %q", repoName))
+	// Fix up package references to use Kind
+	pkgDetail.AvailablePackageRef = &corev1.AvailablePackageReference{
+		Context: &corev1.Context{
+			Namespace: packageRef.Context.Namespace,
+			Cluster:   s.kubeappsCluster,
+		},
+		Plugin:     GetPluginDetail(),
+		Identifier: fmt.Sprintf("%s/%s", kind, chartName),
 	}
 
+	repoUrl := repoObj.Spec.URL
+	if repoUrl == "" {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Missing required field spec.url on repository %q", repo))
+	}
 	pkgDetail.RepoUrl = repoUrl
-	pkgDetail.AvailablePackageRef.Context.Namespace = packageRef.Context.Namespace
-	// per https://github.com/vmware-tanzu/kubeapps/pull/3686#issue-1038093832
-	pkgDetail.AvailablePackageRef.Context.Cluster = s.kubeappsCluster
+
 	return pkgDetail, nil
 }
 

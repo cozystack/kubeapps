@@ -563,8 +563,18 @@ func (c *ChartCache) Get(key string, chart *models.Chart, downloadFn DownloadCha
 	return value, nil
 }
 
-func (c *ChartCache) KeyFor(namespace, chartID, chartVersion string) (string, error) {
-	return chartCacheKeyFor(namespace, chartID, chartVersion)
+// KeyFor returns a cache key for the given chart
+func (c *ChartCache) KeyFor(namespace string, chartID string, version string) (string, error) {
+	parts := strings.Split(chartID, "/")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid chart ID format: %s", chartID)
+	}
+	repoName := parts[0]
+	chartName := parts[1]
+
+	key := fmt.Sprintf("helmcharts:%s:%s/%s:%s", namespace, repoName, chartName, version)
+	log.Infof("Generated cache key: [%s]", key)
+	return key, nil
 }
 
 func (c *ChartCache) String() string {

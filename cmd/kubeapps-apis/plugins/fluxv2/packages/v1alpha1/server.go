@@ -187,8 +187,6 @@ func (s *Server) GetAvailablePackageSummaries(ctx context.Context, request *conn
 	log.Infof("+fluxv2 GetAvailablePackageSummaries(request: [%v])", request)
 	defer log.Info("-fluxv2 GetAvailablePackageSummaries")
 
-	// grpc compiles in getters for you which automatically return a default (empty) struct
-	// if the pointer was nil
 	if request == nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("The request was nil"))
 	}
@@ -213,31 +211,47 @@ func (s *Server) GetAvailablePackageSummaries(ctx context.Context, request *conn
 	}
 
 	pageSize := request.Msg.GetPaginationOptions().GetPageSize()
-	packageSummaries, err := filterAndPaginateCharts(
-		request.Msg.GetFilterOptions(), pageSize, itemOffset, charts)
-	if err != nil {
-		return nil, err
-	}
 
-	// per https://github.com/vmware-tanzu/kubeapps/pull/3686#issue-1038093832
-	for _, summary := range packageSummaries {
-		summary.AvailablePackageRef.Context.Cluster = s.kubeappsCluster
+	// Modify packageSummaries to use Kind instead of chart name
+	summaries := make([]*corev1.AvailablePackageSummary, 0)
+	for repoName, packages := range charts {
+		for _, chart := range packages {
+			if !passesFilter(chart, request.Msg.GetFilterOptions()) {
+				continue
+			}
+
+			// Find corresponding Kind for the chart
+			kind, err := findKindByChartName(s.pluginConfig, chart.Name)
+			if err != nil {
+				// Skip charts that don't have corresponding Kinds
+				continue
+			}
+
+			pkg, err := pkgutils.AvailablePackageSummaryFromChart(&chart, GetPluginDetail())
+			if err != nil {
+				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Unable to parse chart to an AvailablePackageSummary: %w", err))
+			}
+
+			// Update identifier to use Kind
+			pkg.AvailablePackageRef.Identifier = fmt.Sprintf("%s/%s", repoName, kind)
+			summaries = append(summaries, pkg)
+
+			if pageSize > 0 && len(summaries) == int(pageSize) {
+				break
+			}
+		}
 	}
 
 	// Only return a next page token if the request was for pagination and
 	// the results are a full page.
 	nextPageToken := ""
-	if pageSize > 0 && len(packageSummaries) == int(pageSize) {
+	if pageSize > 0 && len(summaries) == int(pageSize) {
 		nextPageToken = fmt.Sprintf("%d", itemOffset+int(pageSize))
 	}
 
 	return connect.NewResponse(&corev1.GetAvailablePackageSummariesResponse{
-		AvailablePackageSummaries: packageSummaries,
+		AvailablePackageSummaries: summaries,
 		NextPageToken:             nextPageToken,
-		// TODO (gfichtenholt) Categories?
-		// Just happened to notice that helm plug-in returning this.
-		// Never discussed this and the design doc appears to have a lot of back-and-forth comments
-		// about this, semantics aren't very clear
 	}), nil
 }
 
@@ -271,14 +285,76 @@ func (s *Server) GetAvailablePackageDetail(ctx context.Context, request *connect
 	}), nil
 }
 
+func (s *Server) getAvailablePackageDetailHelper(ctx context.Context, headers http.Header, ref *corev1.AvailablePackageReference) (*corev1.AvailablePackageDetail, error) {
+	if ref == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Package reference is required"))
+	}
+
+	_, kind, err := pkgutils.SplitPackageIdentifier(ref.Identifier)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+
+	// Find resource config for this Kind
+	var resourceConfig *common.ConfigResource
+	for _, res := range s.pluginConfig.Resources {
+		if res.Application.Kind == kind {
+			resourceConfig = &res
+			break
+		}
+	}
+	if resourceConfig == nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Resource config not found for Kind: %s", kind))
+	}
+
+	// Find the corresponding chart name for the Kind
+	chartName := resourceConfig.Release.Chart.Name
+	if chartName == "" {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Chart name not found in config for Kind: %s", kind))
+	}
+
+	// Use source ref from config
+	repo := types.NamespacedName{
+		Namespace: resourceConfig.Release.Chart.SourceRef.Namespace,
+		Name:      resourceConfig.Release.Chart.SourceRef.Name,
+	}
+
+	chart, err := s.getChartModel(ctx, headers, repo, chartName)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to get chart model: %w", err)
+	}
+
+	if chart == nil {
+		return nil, connect.NewError(connect.CodeNotFound,
+			fmt.Errorf("Chart [%s] not found in repo [%s/%s]", chartName, repo.Namespace, repo.Name))
+	}
+
+	return &corev1.AvailablePackageDetail{
+		Name:             chartName,
+		IconUrl:          chart.Icon,
+		DisplayName:      chart.Name,
+		ShortDescription: chart.Description,
+		Version: &corev1.PackageAppVersion{
+			PkgVersion: chart.ChartVersions[0].Version,
+			AppVersion: chart.ChartVersions[0].AppVersion,
+		},
+		// Добавляем информацию о репозитории и контекст
+		RepoUrl: chart.Repo.URL,
+		AvailablePackageRef: &corev1.AvailablePackageReference{
+			Context: &corev1.Context{
+				Namespace: repo.Namespace,
+				Cluster:   s.kubeappsCluster,
+			},
+			Plugin:     GetPluginDetail(),
+			Identifier: fmt.Sprintf("%s/%s", kind, chartName),
+		},
+	}, nil
+}
+
 // GetAvailablePackageVersions returns the package versions managed by the 'fluxv2' plugin
 func (s *Server) GetAvailablePackageVersions(ctx context.Context, request *connect.Request[corev1.GetAvailablePackageVersionsRequest]) (*connect.Response[corev1.GetAvailablePackageVersionsResponse], error) {
 	log.Infof("+fluxv2 GetAvailablePackageVersions [%v]", request)
 	defer log.Info("-fluxv2 GetAvailablePackageVersions")
-
-	if request.Msg.GetPkgVersion() != "" {
-		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("Not supported yet: request.GetPkgVersion(): [%v]", request.Msg.GetPkgVersion()))
-	}
 
 	packageRef := request.Msg.GetAvailablePackageRef()
 	namespace := packageRef.GetContext().GetNamespace()
@@ -291,26 +367,58 @@ func (s *Server) GetAvailablePackageVersions(ctx context.Context, request *conne
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("Not supported yet: request.AvailablePackageRef.Context.Cluster: [%v]", cluster))
 	}
 
-	repoName, chartName, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
+	log.Infof("Package identifier: %s", packageRef.Identifier)
+	repoName, kind, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
 	if err != nil {
 		return nil, err
+	}
+	log.Infof("Split identifier - repo: [%s], kind: [%s]", repoName, kind)
+
+	// Find the corresponding chart name for the Kind
+	chartName, err := findChartNameByKind(s.pluginConfig, kind)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+	log.Infof("Found chart name: [%s] for kind: [%s]", chartName, kind)
+
+	// Find resource config for this Kind
+	var resourceConfig *common.ConfigResource
+	for _, res := range s.pluginConfig.Resources {
+		if res.Application.Kind == kind {
+			resourceConfig = &res
+			break
+		}
+	}
+	if resourceConfig == nil {
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Resource config not found for Kind: %s", kind))
 	}
 
-	log.Infof("Requesting chart [%s] in namespace [%s]", chartName, namespace)
-	repo := types.NamespacedName{Namespace: namespace, Name: repoName}
+	// Use source ref from config
+	repoNamespace := resourceConfig.Release.Chart.SourceRef.Namespace
+	repoName = resourceConfig.Release.Chart.SourceRef.Name
+	log.Infof("Using repo from config - namespace: [%s], name: [%s]", repoNamespace, repoName)
+
+	repo := types.NamespacedName{
+		Namespace: repoNamespace,
+		Name:      repoName,
+	}
+
 	chart, err := s.getChartModel(ctx, request.Header(), repo, chartName)
 	if err != nil {
-		return nil, err
-	} else if chart != nil {
-		// found it
-		return connect.NewResponse(&corev1.GetAvailablePackageVersionsResponse{
-			PackageAppVersions: pkgutils.PackageAppVersionsSummary(
-				chart.ChartVersions,
-				s.pluginConfig.VersionsInSummary),
-		}), nil
-	} else {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Unable to retrieve versions for chart: [%s]", packageRef.Identifier))
+		return nil, fmt.Errorf("Failed to get chart model: %w", err)
 	}
+
+	if chart == nil {
+		return nil, connect.NewError(connect.CodeNotFound,
+			fmt.Errorf("Chart [%s] not found in repo [%s/%s]", chartName, repo.Namespace, repo.Name))
+	}
+
+	log.Infof("Found chart versions: %+v", chart.ChartVersions)
+	return connect.NewResponse(&corev1.GetAvailablePackageVersionsResponse{
+		PackageAppVersions: pkgutils.PackageAppVersionsSummary(
+			chart.ChartVersions,
+			s.pluginConfig.VersionsInSummary),
+	}), nil
 }
 
 // GetInstalledPackageSummaries returns the installed packages managed by the 'fluxv2' plugin
@@ -367,11 +475,32 @@ func (s *Server) GetInstalledPackageDetail(ctx context.Context, request *connect
 		return nil, connect.NewError(connect.CodeUnimplemented, fmt.Errorf("Not supported yet: request.InstalledPackageRef.Context.Cluster: [%v]", cluster))
 	}
 
-	key := types.NamespacedName{Namespace: packageRef.Context.Namespace, Name: packageRef.Identifier}
+	// Split identifier to get Kind and name
+	parts := strings.Split(packageRef.Identifier, "/")
+	if len(parts) != 2 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Invalid identifier format. Expected <Kind>/<name>, got: %s", packageRef.Identifier))
+	}
+	kind := parts[0]
+	name := parts[1]
+
+	// Find corresponding chart
+	chartName, err := findChartNameByKind(s.pluginConfig, kind)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeNotFound, err)
+	}
+
+	key := types.NamespacedName{
+		Namespace: packageRef.Context.Namespace,
+		Name:      fmt.Sprintf("%s/%s", chartName, name),
+	}
+
 	pkgDetail, err := s.installedPackageDetail(ctx, request.Header(), key)
 	if err != nil {
 		return nil, err
 	}
+
+	// Update identifier to use Kind instead of chart name
+	pkgDetail.InstalledPackageRef.Identifier = fmt.Sprintf("%s/%s", kind, name)
 
 	return connect.NewResponse(&corev1.GetInstalledPackageDetailResponse{
 		InstalledPackageDetail: pkgDetail,
@@ -479,25 +608,25 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 	pkgRef := request.Msg.GetInstalledPackageRef()
 	log.InfoS("+fluxv2 GetInstalledPackageResourceRefs", "cluster", pkgRef.GetContext().GetCluster(), "namespace", pkgRef.GetContext().GetNamespace(), "id", pkgRef.GetIdentifier())
 
-	// Split identifier to get resource type and name
+	// Split identifier to get Kind and name
 	parts := strings.Split(pkgRef.GetIdentifier(), "/")
 	if len(parts) != 2 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Invalid identifier format: %s", pkgRef.GetIdentifier()))
 	}
-	resourceKind := parts[0]
-	resourceName := parts[1]
+	kind := parts[0]
+	name := parts[1]
 	namespace := pkgRef.GetContext().GetNamespace()
 
 	// Find resource config
 	var resourceConfig *common.ConfigResource
 	for _, res := range s.pluginConfig.Resources {
-		if res.Application.Kind == resourceKind {
+		if res.Application.Kind == kind {
 			resourceConfig = &res
 			break
 		}
 	}
 	if resourceConfig == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Resource kind not found: %s", resourceKind))
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Resource kind not found: %s", kind))
 	}
 
 	// Get the resource to check its spec
@@ -510,8 +639,8 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 	// Create base ResourceRef for the main resource
 	resourceRefs := []*corev1.ResourceRef{{
 		ApiVersion: fmt.Sprintf("%s/%s", gvr.Group, gvr.Version),
-		Kind:       resourceKind,
-		Name:       resourceName,
+		Kind:       kind,
+		Name:       name,
 		Namespace:  namespace,
 	}}
 
@@ -522,7 +651,7 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 	}
 
 	// Get the resource object
-	obj, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	obj, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to get resource: %w", err))
 	}
