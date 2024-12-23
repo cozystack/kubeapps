@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,9 +18,12 @@ import (
 	helmv2 "github.com/fluxcd/helm-controller/api/v2"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/restmapper"
 
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/core"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
@@ -539,16 +543,36 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 	pkgRef := request.Msg.GetInstalledPackageRef()
 	log.InfoS("+fluxv2 GetInstalledPackageResourceRefs", "cluster", pkgRef.GetContext().GetCluster(), "namespace", pkgRef.GetContext().GetNamespace(), "id", pkgRef.GetIdentifier())
 
+	role, err := s.getRoleFromPackageRef(ctx, request.Header(), pkgRef)
+	if err != nil {
+		return nil, err
+	}
+
+	resourceRefs, err := s.extractResourceRefsFromRole(ctx, request.Header(), role, pkgRef.GetContext().GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+
+	return connect.NewResponse(&corev1.GetInstalledPackageResourceRefsResponse{
+		Context: &corev1.Context{
+			Cluster:   s.kubeappsCluster,
+			Namespace: pkgRef.GetContext().GetNamespace(),
+		},
+		ResourceRefs: resourceRefs,
+	}), nil
+}
+
+// getRoleFromPackageRef retrieves the RBAC role associated with an installed package
+func (s *Server) getRoleFromPackageRef(ctx context.Context, headers http.Header, pkgRef *corev1.InstalledPackageReference) (*unstructured.Unstructured, error) {
 	// Split identifier to get Kind and name
 	parts := strings.Split(pkgRef.GetIdentifier(), "/")
 	if len(parts) != 2 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Invalid identifier format: %s", pkgRef.GetIdentifier()))
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Invalid identifier format. Expected <Kind>/<name>, got: %s", pkgRef.GetIdentifier()))
 	}
 	kind := parts[0]
 	name := parts[1]
-	namespace := pkgRef.GetContext().GetNamespace()
 
-	// Find resource config
+	// Find resource config for this Kind
 	var resourceConfig *common.ConfigResource
 	for _, res := range s.pluginConfig.Resources {
 		if res.Application.Kind == kind {
@@ -557,49 +581,86 @@ func (s *Server) GetInstalledPackageResourceRefs(ctx context.Context, request *c
 		}
 	}
 	if resourceConfig == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Resource kind not found: %s", kind))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("No resource configuration found for Kind: %s", kind))
 	}
 
-	// Get the resource to check its spec
-	gvr := schema.GroupVersionResource{
-		Group:    "apps.cozystack.io",
-		Version:  "v1alpha1",
-		Resource: resourceConfig.Application.Plural,
-	}
-
-	// Create base ResourceRef for the main resource
-	resourceRefs := []*corev1.ResourceRef{{
-		ApiVersion: fmt.Sprintf("%s/%s", gvr.Group, gvr.Version),
-		Kind:       kind,
-		Name:       name,
-		Namespace:  namespace,
-	}}
-
-	// Get dynamic client with user auth
-	dynamicClient, err := s.clientGetter.Dynamic(request.Header(), s.kubeappsCluster)
+	// Getting dynamic client
+	dynamicClient, err := s.clientGetter.Dynamic(headers, pkgRef.GetContext().GetCluster())
 	if err != nil {
-		return nil, fmt.Errorf("failed to get dynamic client: %w", err)
+		log.Errorf("Failed to get dynamic client: %v", err)
+		return nil, err
 	}
 
-	// Get the resource object
-	obj, err := dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	// Getting the role using the chart prefix from resourceConfig
+	roleGVR := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}
+	roleName := fmt.Sprintf("%s%s-dashboard-resources", resourceConfig.Release.Prefix, name)
+	namespace := pkgRef.GetContext().GetNamespace()
+
+	log.Infof("Looking for role: %s in namespace: %s", roleName, namespace)
+
+	role, err := dynamicClient.Resource(roleGVR).Namespace(namespace).Get(ctx, roleName, metav1.GetOptions{})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Failed to get resource: %w", err))
+		log.Errorf("Failed to get role %s: %v", roleName, err)
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Unable to get role %s: %w", roleName, err))
 	}
 
-	// Extract references from spec
-	if spec, ok := obj.Object["spec"].(map[string]interface{}); ok {
-		// Recursively process spec looking for any references to other resources
-		s.processSpecForRefs(spec, namespace, resourceRefs)
+	// Logging Role content for debugging
+	roleContent, _ := json.Marshal(role)
+	log.Infof("Role content: %s", string(roleContent))
+
+	return role, nil
+}
+
+// extractResourceRefsFromRole extracts ResourceRefs from an RBAC role
+func (s *Server) extractResourceRefsFromRole(ctx context.Context, headers http.Header, role *unstructured.Unstructured, namespace string) ([]*corev1.ResourceRef, error) {
+	// Getting Discovery Client to work with RESTMapper
+	discoveryClient, err := s.clientGetter.Typed(headers, s.kubeappsCluster)
+	if err != nil {
+		log.Errorf("Failed to create discovery client: %v", err)
+		return nil, err
+	}
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(discoveryClient.Discovery()))
+
+	resourcesFromRole := make([]*corev1.ResourceRef, 0)
+	rules, found, _ := unstructured.NestedSlice(role.Object, "rules")
+	if !found {
+		log.Errorf("No rules found in role %s", role.GetName())
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("No rules found in role %s", role.GetName()))
 	}
 
-	return connect.NewResponse(&corev1.GetInstalledPackageResourceRefsResponse{
-		Context: &corev1.Context{
-			Cluster:   s.kubeappsCluster,
-			Namespace: namespace,
-		},
-		ResourceRefs: resourceRefs,
-	}), nil
+	for _, rule := range rules {
+		r := rule.(map[string]interface{})
+		resources, _ := r["resources"].([]interface{})
+		apiGroups, _ := r["apiGroups"].([]interface{})
+
+		for _, resource := range resources {
+			resourceStr := resource.(string)
+			for _, apiGroup := range apiGroups {
+				apiGroupStr := apiGroup.(string)
+
+				// Using GroupVersionResource to get GroupVersionKind
+				gvr := schema.GroupVersionResource{Group: apiGroupStr, Version: "v1", Resource: resourceStr}
+				gvk, err := mapper.KindFor(gvr)
+				if err != nil {
+					log.Errorf("Failed to get GroupVersionKind for GVR %v: %v", gvr, err)
+					continue
+				}
+
+				resourceNames, _ := r["resourceNames"].([]interface{})
+				for _, resourceName := range resourceNames {
+					resourceNameStr := resourceName.(string)
+					resourcesFromRole = append(resourcesFromRole, &corev1.ResourceRef{
+						ApiVersion: gvk.GroupVersion().String(),
+						Kind:       gvk.Kind,
+						Name:       resourceNameStr,
+						Namespace:  namespace,
+					})
+				}
+			}
+		}
+	}
+
+	return resourcesFromRole, nil
 }
 
 // processSpecForRefs recursively processes a spec map looking for references to other resources
