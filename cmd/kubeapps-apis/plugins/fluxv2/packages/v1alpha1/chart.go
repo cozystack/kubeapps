@@ -178,6 +178,7 @@ func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, 
 			Namespace: packageRef.Context.Namespace,
 			Cluster:   s.kubeappsCluster,
 		},
+		Plugin:     GetPluginDetail(),
 		Identifier: fmt.Sprintf("%s/%s", repo.Name, kind),
 	}
 

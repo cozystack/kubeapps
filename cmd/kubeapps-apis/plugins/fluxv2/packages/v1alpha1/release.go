@@ -110,7 +110,7 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 	name := rel.GetName()
 	namespace := rel.GetNamespace()
 	kind := rel.GetKind()
-	version, _, _ := unstructured.NestedString(rel.Object, "appVersion")
+	version, _, _ := unstructured.NestedString(rel.Object, "status", "version")
 
 	// Find resource config by kind
 	var resourceConfig *common.ConfigResource
@@ -123,9 +123,6 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 	if resourceConfig == nil {
 		return nil, fmt.Errorf("Resource config not found for kind: %s", kind)
 	}
-
-	// Create identifier using Kind
-	identifier := fmt.Sprintf("%s/%s", kind, name)
 
 	availablePkgRef := &corev1.AvailablePackageReference{
 		Context: &corev1.Context{
@@ -149,13 +146,14 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 				Namespace: namespace,
 				Cluster:   s.kubeappsCluster,
 			},
-			Identifier: identifier,
+			Identifier: fmt.Sprintf("%s/%s", kind, name),
 			Plugin:     GetPluginDetail(),
 		},
-		Name: name,
+		Name:          name,
+		LatestVersion: pkgDetail.Version,
 		CurrentVersion: &corev1.PackageAppVersion{
 			PkgVersion: version,
-			AppVersion: version,
+			AppVersion: pkgDetail.Version.AppVersion,
 		},
 		IconUrl:          pkgDetail.IconUrl,
 		PkgDisplayName:   pkgDetail.DisplayName,
@@ -193,8 +191,8 @@ func (s *Server) getAvailablePackageDetail(ctx context.Context, headers http.Hea
 		IconUrl:          chart.Icon,
 		ShortDescription: chart.Description,
 		Version: &corev1.PackageAppVersion{
-			PkgVersion: chart.ChartVersions[0].Version,    // TODO
-			AppVersion: chart.ChartVersions[0].AppVersion, // TODO
+			PkgVersion: chart.ChartVersions[0].Version,
+			AppVersion: chart.ChartVersions[0].AppVersion,
 		},
 	}, nil
 }
@@ -555,7 +553,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 		Name: name,
 		CurrentVersion: &corev1.PackageAppVersion{
 			PkgVersion: version,
-			AppVersion: version,
+			//AppVersion: version, // TODO
 		},
 		AvailablePackageRef: availablePkgRef,
 		ValuesApplied:       string(valuesJson),
