@@ -285,72 +285,6 @@ func (s *Server) GetAvailablePackageDetail(ctx context.Context, request *connect
 	}), nil
 }
 
-func (s *Server) getAvailablePackageDetailHelper(ctx context.Context, headers http.Header, ref *corev1.AvailablePackageReference) (*corev1.AvailablePackageDetail, error) {
-	if ref == nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Package reference is required"))
-	}
-
-	_, kind, err := pkgutils.SplitPackageIdentifier(ref.Identifier)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInvalidArgument, err)
-	}
-
-	// Find resource config for this Kind
-	var resourceConfig *common.ConfigResource
-	for _, res := range s.pluginConfig.Resources {
-		if res.Application.Kind == kind {
-			resourceConfig = &res
-			break
-		}
-	}
-	if resourceConfig == nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Resource config not found for Kind: %s", kind))
-	}
-
-	// Find the corresponding chart name for the Kind
-	chartName := resourceConfig.Release.Chart.Name
-	if chartName == "" {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Chart name not found in config for Kind: %s", kind))
-	}
-
-	// Use source ref from config
-	repo := types.NamespacedName{
-		Namespace: resourceConfig.Release.Chart.SourceRef.Namespace,
-		Name:      resourceConfig.Release.Chart.SourceRef.Name,
-	}
-
-	chart, err := s.getChartModel(ctx, headers, repo, chartName)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to get chart model: %w", err)
-	}
-
-	if chart == nil {
-		return nil, connect.NewError(connect.CodeNotFound,
-			fmt.Errorf("Chart [%s] not found in repo [%s/%s]", chartName, repo.Namespace, repo.Name))
-	}
-
-	return &corev1.AvailablePackageDetail{
-		Name:             chartName,
-		IconUrl:          chart.Icon,
-		DisplayName:      chart.Name,
-		ShortDescription: chart.Description,
-		Version: &corev1.PackageAppVersion{
-			PkgVersion: chart.ChartVersions[0].Version,
-			AppVersion: chart.ChartVersions[0].AppVersion,
-		},
-		// Добавляем информацию о репозитории и контекст
-		RepoUrl: chart.Repo.URL,
-		AvailablePackageRef: &corev1.AvailablePackageReference{
-			Context: &corev1.Context{
-				Namespace: repo.Namespace,
-				Cluster:   s.kubeappsCluster,
-			},
-			Plugin:     GetPluginDetail(),
-			Identifier: fmt.Sprintf("%s/%s", kind, chartName),
-		},
-	}, nil
-}
-
 // GetAvailablePackageVersions returns the package versions managed by the 'fluxv2' plugin
 func (s *Server) GetAvailablePackageVersions(ctx context.Context, request *connect.Request[corev1.GetAvailablePackageVersionsRequest]) (*connect.Response[corev1.GetAvailablePackageVersionsResponse], error) {
 	log.Infof("+fluxv2 GetAvailablePackageVersions [%v]", request)
@@ -483,15 +417,9 @@ func (s *Server) GetInstalledPackageDetail(ctx context.Context, request *connect
 	kind := parts[0]
 	name := parts[1]
 
-	// Find corresponding chart
-	chartName, err := findChartNameByKind(s.pluginConfig, kind)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, err)
-	}
-
 	key := types.NamespacedName{
 		Namespace: packageRef.Context.Namespace,
-		Name:      fmt.Sprintf("%s/%s", chartName, name),
+		Name:      fmt.Sprintf("%s/%s", kind, name),
 	}
 
 	pkgDetail, err := s.installedPackageDetail(ctx, request.Header(), key)

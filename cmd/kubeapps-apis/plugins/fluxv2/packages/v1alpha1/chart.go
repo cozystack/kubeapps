@@ -62,24 +62,22 @@ func findChartNameByKind(config *common.FluxPluginConfig, kind string) (string, 
 func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, packageRef *corev1.AvailablePackageReference, chartVersion string) (*corev1.AvailablePackageDetail, error) {
 	log.Infof("+availableChartDetail(%s, %s)", packageRef, chartVersion)
 
-	repoName, kindLower, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
+	repoName, kind, err := pkgutils.SplitPackageIdentifier(packageRef.Identifier)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	log.Infof("Split identifier - repo: [%s], kind: [%s]", repoName, kindLower)
+	log.Infof("Split identifier - repo: [%s], kind: [%s]", repoName, kind)
 
 	// Find resource config by case-insensitive comparison
 	var resourceConfig *common.ConfigResource
-	var kind string
 	for _, res := range s.pluginConfig.Resources {
-		if strings.EqualFold(res.Application.Kind, kindLower) {
+		if res.Application.Kind == kind {
 			resourceConfig = &res
-			kind = res.Application.Kind // Use the properly cased Kind from config
 			break
 		}
 	}
 	if resourceConfig == nil {
-		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Resource config not found for Kind: %s", kindLower))
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("Resource config not found for Kind: %s", kind))
 	}
 	log.Infof("Found resource config for kind [%s], chart name: [%s]", kind, resourceConfig.Release.Chart.Name)
 
@@ -179,7 +177,7 @@ func (s *Server) availableChartDetail(ctx context.Context, headers http.Header, 
 			Cluster:   s.kubeappsCluster,
 		},
 		Plugin:     GetPluginDetail(),
-		Identifier: fmt.Sprintf("%s/%s", kind, chartName),
+		Identifier: fmt.Sprintf("%s/%s", repo.Name, kind),
 	}
 
 	repoUrl := repoObj.Spec.URL
@@ -275,13 +273,7 @@ func passesFilter(chart models.Chart, filters *corev1.FilterOptions) bool {
 	return ok
 }
 
-func filterAndPaginateCharts(filters *corev1.FilterOptions, pageSize int32, itemOffset int, charts map[string][]models.Chart) ([]*corev1.AvailablePackageSummary, error) {
-	// this loop is here for 3 reasons:
-	// 1) to convert from []interface{} which is what the generic cache implementation
-	// returns for cache hits to a typed array object.
-	// 2) perform any filtering of the results as needed, pending redis support for
-	// querying values stored in cache (see discussion in https://github.com/vmware-tanzu/kubeapps/issues/3032)
-	// 3) if pagination was requested, only return up to one page size of results
+func filterAndPaginateCharts(filters *corev1.FilterOptions, pageSize int32, itemOffset int, charts map[string][]models.Chart, pluginConfig *common.FluxPluginConfig) ([]*corev1.AvailablePackageSummary, error) {
 	summaries := make([]*corev1.AvailablePackageSummary, 0)
 	i := 0
 	startAt := -1
@@ -290,14 +282,26 @@ func filterAndPaginateCharts(filters *corev1.FilterOptions, pageSize int32, item
 	}
 	for _, packages := range charts {
 		for p := range packages {
-			chart := packages[p] // avoid implicit memory aliasing
+			chart := packages[p]
 			if passesFilter(chart, filters) {
 				i++
 				if startAt < i {
+					// Find resource config for this chart
+					resourceConfig := pluginConfig.FindResourceByChart(chart.Repo.Name, chart.Name)
+					if resourceConfig == nil {
+						continue
+					}
+
 					pkg, err := pkgutils.AvailablePackageSummaryFromChart(&chart, GetPluginDetail())
 					if err != nil {
 						return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Unable to parse chart to an AvailablePackageSummary: %w", err))
 					}
+
+					// Update the identifier to use Kind
+					pkg.AvailablePackageRef.Identifier = fmt.Sprintf("%s/%s", resourceConfig.Application.Kind, chart.Name)
+					pkg.Name = resourceConfig.Application.Kind
+					pkg.DisplayName = resourceConfig.Application.Kind
+
 					summaries = append(summaries, pkg)
 					if pageSize > 0 && len(summaries) == int(pageSize) {
 						return summaries, nil

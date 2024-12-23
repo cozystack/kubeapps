@@ -134,7 +134,7 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 		},
 		Identifier: fmt.Sprintf("%s/%s",
 			resourceConfig.Release.Chart.SourceRef.Name,
-			resourceConfig.Release.Chart.Name),
+			kind),
 		Plugin: GetPluginDetail(),
 	}
 
@@ -165,12 +165,18 @@ func (s *Server) installedPkgSummaryFromRelease(ctx context.Context, headers htt
 }
 
 func (s *Server) getAvailablePackageDetail(ctx context.Context, headers http.Header, ref *corev1.AvailablePackageReference) (*corev1.AvailablePackageDetail, error) {
-	repoName, chartName, err := pkgutils.SplitPackageIdentifier(ref.Identifier)
+	repoName, kind, err := pkgutils.SplitPackageIdentifier(ref.Identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	chartName, err := findChartNameByKind(s.pluginConfig, kind)
 	if err != nil {
 		return nil, err
 	}
 
 	repo := types.NamespacedName{Namespace: ref.Context.Namespace, Name: repoName}
+
 	chart, err := s.getChartModel(ctx, headers, repo, chartName)
 	if err != nil {
 		return nil, err
@@ -181,9 +187,10 @@ func (s *Server) getAvailablePackageDetail(ctx context.Context, headers http.Hea
 	}
 
 	return &corev1.AvailablePackageDetail{
-		Name:             chartName,
+		Name:        kind,
+		DisplayName: kind,
+		//DisplayName:      chart.Name,
 		IconUrl:          chart.Icon,
-		DisplayName:      chart.Name,
 		ShortDescription: chart.Description,
 		Version: &corev1.PackageAppVersion{
 			PkgVersion: chart.ChartVersions[0].Version,    // TODO
@@ -472,19 +479,19 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid identifier format: %s, expected ChartName/Name", key.Name)
 	}
-	chartName := parts[0]
+	kind := parts[0]
 	name := parts[1]
 
-	// Find the resource config by chart name
+	// Find the resource config for this Kind
 	var resourceConfig *common.ConfigResource
 	for _, res := range s.pluginConfig.Resources {
-		if res.Release.Chart.Name == chartName {
+		if res.Application.Kind == kind {
 			resourceConfig = &res
 			break
 		}
 	}
 	if resourceConfig == nil {
-		return nil, fmt.Errorf("resource config not found for chart: %s", chartName)
+		return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("No resource configuration found for Kind: %s", kind))
 	}
 
 	// Get GVR
@@ -520,7 +527,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 		},
 		Identifier: fmt.Sprintf("%s/%s",
 			resourceConfig.Release.Chart.SourceRef.Name,
-			resourceConfig.Release.Chart.Name),
+			resourceConfig.Application.Kind),
 		Plugin: GetPluginDetail(),
 	}
 
@@ -530,7 +537,7 @@ func (s *Server) installedPackageDetail(ctx context.Context, headers http.Header
 				Namespace: key.Namespace,
 				Cluster:   s.kubeappsCluster,
 			},
-			Identifier: fmt.Sprintf("%s/%s", chartName, name),
+			Identifier: fmt.Sprintf("%s/%s", kind, name),
 			Plugin:     GetPluginDetail(),
 		},
 		Name: name,
