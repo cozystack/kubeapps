@@ -42,7 +42,7 @@ function AppListGrid(props: IAppListProps) {
           Start browsing your <Link to={url.app.catalog(cluster, namespace)}>favourite apps</Link>{" "}
           or check the{" "}
           <a
-            href={`https://github.com/vmware-tanzu/kubeapps/blob/${appVersion}/site/content/docs/latest/tutorials/getting-started.md`}
+            href={"https://cozystack.io/docs/"}
             target="_blank"
             rel="noopener noreferrer"
           >
