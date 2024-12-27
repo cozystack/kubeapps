@@ -78,16 +78,6 @@ function Menu({ clusters, appVersion, logout }: IContextSelectorProps) {
           <div className="dropdown-menu dropdown-configuration-menu" role="menu" hidden={!open}>
             <div>
               <label className="dropdown-menu-padding dropdown-menu-label">Administration</label>
-              <Link
-                to={app.config.pkgrepositories(clusters.currentCluster, namespaceSelected)}
-                className="dropdown-menu-link"
-                onClick={toggleOpen}
-              >
-                <div className="dropdown-menu-item" role="menuitem">
-                  <CdsIcon solid={true} size="md" shape="library" />{" "}
-                  <span>Package Repositories</span>
-                </div>
-              </Link>
               <div className="dropdown-divider" role="separator" />
               {featureFlags?.operators && (
                 <Link

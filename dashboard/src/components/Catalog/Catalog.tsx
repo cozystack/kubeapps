@@ -15,7 +15,6 @@ import qs from "qs";
 import React, { useEffect } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import * as ReactRouter from "react-router-dom";
-import { Link } from "react-router-dom";
 import { IClusterServiceVersion, IStoreState } from "shared/types";
 import { app } from "shared/url";
 import { escapeRegExp, getPluginPackageName } from "shared/utils";
@@ -85,7 +84,6 @@ export default function Catalog() {
     operators,
     repos: { reposSummaries: repos },
     config: {
-      appVersion,
       kubeappsCluster,
       helmGlobalNamespace,
       carvelGlobalNamespace,
@@ -420,24 +418,6 @@ export default function Catalog() {
         <div className="empty-catalog">
           <CdsIcon shape="bundle" />
           <p>The current catalog is empty.</p>
-          <p>
-            Manage your Package Repositories in Kubeapps by visiting the Package repositories
-            configuration page.
-          </p>
-          <Link to={app.config.pkgrepositories(cluster || "", namespace || "")}>
-            <CdsButton>Manage Package Repositories</CdsButton>
-          </Link>
-          <p>
-            For help managing other packaging formats, such as Flux or Carvel, please refer to the{" "}
-            <a
-              target="_blank"
-              rel="noopener noreferrer"
-              href={`https://github.com/vmware-tanzu/kubeapps/tree/${appVersion}/site/content/docs/latest`}
-            >
-              Kubeapps documentation
-            </a>
-            .
-          </p>
         </div>
       ) : (
         <Row>
