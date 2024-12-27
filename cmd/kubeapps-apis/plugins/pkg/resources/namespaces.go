@@ -6,6 +6,7 @@ package resources
 import (
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/bufbuild/connect-go"
@@ -66,11 +67,11 @@ func FindAccessibleNamespaces(userClientGetter clientgetter.TypedClientFunc, ser
 		if namespaceList, err := filterAllowedNamespaces(userClient, maxWorkers, namespaces.Items); err != nil {
 			return nil, err
 		} else {
-			return namespaceList, nil
+			return filterTenantNamespaces(namespaceList), nil
 		}
 	} else {
 		// If the user can list namespaces, do not filter them
-		return namespaces.Items, nil
+		return filterTenantNamespaces(namespaces.Items), nil
 	}
 }
 
@@ -147,4 +148,14 @@ func FilterActiveNamespaces(namespaces []corev1.Namespace) []corev1.Namespace {
 		}
 	}
 	return readyNamespaces
+}
+
+func filterTenantNamespaces(namespaces []corev1.Namespace) []corev1.Namespace {
+	var tenantNamespaces []corev1.Namespace
+	for _, ns := range namespaces {
+		if strings.HasPrefix(ns.Name, "tenant-") {
+			tenantNamespaces = append(tenantNamespaces, ns)
+		}
+	}
+	return tenantNamespaces
 }
