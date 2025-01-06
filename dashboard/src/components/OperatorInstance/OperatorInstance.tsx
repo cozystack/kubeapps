@@ -43,6 +43,7 @@ function parseResource(
     deployments: [],
     statefulsets: [],
     daemonsets: [],
+    workloadmonitors: [],
     otherResources: [],
     services: [],
     secrets: [],
@@ -62,6 +63,9 @@ function parseResource(
           break;
         case "DaemonSet":
           result.daemonsets.push(fromCRD(r, kind, cluster, namespace, ownerRef));
+          break;
+        case "WorkloadMonitor":
+          result.workloadmonitors.push(fromCRD(r, kind, cluster, namespace, ownerRef));
           break;
         case "Service":
           result.services.push(fromCRD(r, kind, cluster, namespace, ownerRef));
@@ -88,6 +92,9 @@ function parseResource(
         fromCRD({ ...emptyCRD, kind: "StatefulSet" }, kind, cluster, namespace, ownerRef),
       ],
       daemonsets: [fromCRD({ ...emptyCRD, kind: "DaemonSet" }, kind, cluster, namespace, ownerRef)],
+      workloadmonitors: [
+        fromCRD({ ...emptyCRD, kind: "WorkloadMonitor" }, kind, cluster, namespace, ownerRef),
+      ],
       services: [fromCRD({ ...emptyCRD, kind: "Service" }, kind, cluster, namespace, ownerRef)],
       secrets: [fromCRD({ ...emptyCRD, kind: "Secret" }, kind, cluster, namespace, ownerRef)],
       otherResources: [],
@@ -106,12 +113,21 @@ function OperatorInstance() {
     deployments: [],
     statefulsets: [],
     daemonsets: [],
+    workloadmonitors: [],
     otherResources: [],
     services: [],
     secrets: [],
   } as IAppViewResourceRefs);
-  const { services, ingresses, deployments, statefulsets, daemonsets, secrets, otherResources } =
-    resourceRefs;
+  const {
+    services,
+    ingresses,
+    deployments,
+    statefulsets,
+    daemonsets,
+    workloadmonitors,
+    secrets,
+    otherResources,
+  } = resourceRefs;
   const [modalIsOpen, setModalIsOpen] = useState(false);
   const closeModal = () => setModalIsOpen(false);
   const openModal = () => setModalIsOpen(true);
@@ -236,6 +252,7 @@ function OperatorInstance() {
                       deployRefs={deployments}
                       statefulsetRefs={statefulsets}
                       daemonsetRefs={daemonsets}
+                      workloadmonitorRefs={workloadmonitors}
                     />
                     <AccessURLTable serviceRefs={services} ingressRefs={ingresses} />
                     <AppSecrets secretRefs={secrets} />
@@ -252,6 +269,7 @@ function OperatorInstance() {
                       deployments,
                       statefulsets,
                       daemonsets,
+                      workloadmonitors,
                       secrets,
                       services,
                       otherResources,

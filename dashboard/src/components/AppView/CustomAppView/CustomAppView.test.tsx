@@ -34,6 +34,7 @@ const defaultProps = {
     ] as ResourceRef[],
     statefulsets: [] as ResourceRef[],
     daemonsets: [] as ResourceRef[],
+    workloadmonitors: [] as ResourceRef[],
     otherResources: [
       {
         cluster: "default",

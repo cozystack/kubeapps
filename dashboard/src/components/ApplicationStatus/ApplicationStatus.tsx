@@ -22,6 +22,7 @@ interface IApplicationStatusProps {
   deployRefs: ResourceRef[];
   statefulsetRefs: ResourceRef[];
   daemonsetRefs: ResourceRef[];
+  workloadmonitorRefs: ResourceRef[];
   info?: InstalledPackageDetail;
 }
 
@@ -65,6 +66,7 @@ export default function ApplicationStatus({
   deployRefs,
   statefulsetRefs,
   daemonsetRefs,
+  workloadmonitorRefs,
   info,
 }: IApplicationStatusProps) {
   const { kube } = useSelector((state: IStoreState) => state);
@@ -89,6 +91,13 @@ export default function ApplicationStatus({
   useEffect(() => {
     setDaemonsets(filterByResourceRefs(daemonsetRefs, kube.items));
   }, [daemonsetRefs, kube.items]);
+
+  const [workloadmonitors, setWorkloadmonitors] = useState<
+    IKubeItem<IResource | IK8sList<IResource, {}>>[]
+  >([]);
+  useEffect(() => {
+    setWorkloadmonitors(filterByResourceRefs(workloadmonitorRefs, kube.items));
+  }, [workloadmonitorRefs, kube.items]);
 
   const [workloads, setWorkloads] = useState([] as IWorkload[]);
   const [totalPods, setTotalPods] = useState(0);
@@ -117,10 +126,21 @@ export default function ApplicationStatus({
         totalKey: "status.currentNumberScheduled",
         type: "daemonset",
       },
+      {
+        workloads: flattenItemList(workloadmonitors),
+        readyKey: "status.availableReplicas",
+        totalKey: "spec.replicas",
+        fallbackTotalKey: "status.observedReplicas", // fallback for when spec.replicas is empty
+        type: "workloadmonitor",
+      },
     ].forEach(src => {
       src.workloads.forEach(w => {
         const wReady = get(w, src.readyKey, 0);
-        const wTotal = get(w, src.totalKey, 0);
+        let wTotal = get(w, src.totalKey, 0);
+        // For WorkloadMonitor, use observedReplicas if replicas is not set
+        if (src.type === "workloadmonitor" && wTotal === 0 && src.fallbackTotalKey) {
+          wTotal = get(w, src.fallbackTotalKey, 0);
+        }
         if (wReady) {
           currentReadyPods += wReady;
         }
@@ -138,7 +158,7 @@ export default function ApplicationStatus({
     setWorkloads(currentWorkloads);
     setReadyPods(currentReadyPods);
     setTotalPods(currentTotalPods);
-  }, [deployments, statefulsets, daemonsets]);
+  }, [deployments, statefulsets, daemonsets, workloadmonitors]);
 
   const ready = totalPods === readyPods;
 

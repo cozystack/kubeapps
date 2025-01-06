@@ -19,11 +19,10 @@ export interface IAppListProps {
   filter: string;
   customResources: IResource[];
   csvs: IClusterServiceVersion[];
-  appVersion: string;
 }
 
 function AppListGrid(props: IAppListProps) {
-  const { appList, customResources, cluster, namespace, appVersion, filter } = props;
+  const { appList, customResources, cluster, namespace, filter } = props;
   const filteredReleases = (appList || []).filter(a =>
     new RegExp(escapeRegExp(filter), "i").test(a.name),
   );
@@ -41,11 +40,7 @@ function AppListGrid(props: IAppListProps) {
         <p>
           Start browsing your <Link to={url.app.catalog(cluster, namespace)}>favourite apps</Link>{" "}
           or check the{" "}
-          <a
-            href={"https://cozystack.io/docs/"}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+          <a href={"https://cozystack.io/docs/"} target="_blank" rel="noopener noreferrer">
             documentation
           </a>
           .

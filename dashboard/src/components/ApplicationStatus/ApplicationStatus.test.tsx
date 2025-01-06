@@ -20,6 +20,7 @@ const defaultProps = {
   deployRefs: [],
   statefulsetRefs: [],
   daemonsetRefs: [],
+  workloadmonitorRefs: [],
 };
 
 it("renders a loading status", () => {

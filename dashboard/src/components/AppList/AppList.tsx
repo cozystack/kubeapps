@@ -31,7 +31,7 @@ function AppList() {
     apps: { error, isFetching, listOverview },
     clusters: { clusters, currentCluster },
     operators: { isFetching: isFetchingResources, resources: customResources, csvs },
-    config: { appVersion, featureFlags },
+    config: { featureFlags },
   } = useSelector((state: IStoreState) => state);
   const cluster = currentCluster;
   const { currentNamespace } = clusters[cluster];
@@ -136,7 +136,6 @@ function AppList() {
             customResources={customResources}
             cluster={cluster}
             namespace={currentNamespace}
-            appVersion={appVersion}
             filter={searchFilter}
             csvs={csvs}
           />

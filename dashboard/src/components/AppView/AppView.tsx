@@ -50,6 +50,7 @@ export interface IAppViewResourceRefs {
   deployments: ResourceRef[];
   statefulsets: ResourceRef[];
   daemonsets: ResourceRef[];
+  workloadmonitors: ResourceRef[];
   services: ResourceRef[];
   ingresses: ResourceRef[];
   secrets: ResourceRef[];
@@ -62,6 +63,7 @@ function parseResources(resourceRefs: Array<ResourceRef>) {
     deployments: [],
     statefulsets: [],
     daemonsets: [],
+    workloadmonitors: [],
     otherResources: [],
     services: [],
     secrets: [],
@@ -76,6 +78,9 @@ function parseResources(resourceRefs: Array<ResourceRef>) {
         break;
       case "DaemonSet":
         result.daemonsets.push(ref);
+        break;
+      case "WorkloadMonitor":
+        result.workloadmonitors.push(ref);
         break;
       case "Service":
         result.services.push(ref);
@@ -155,6 +160,7 @@ export default function AppView() {
     deployments: [],
     statefulsets: [],
     daemonsets: [],
+    workloadmonitors: [],
     otherResources: [],
     services: [],
     secrets: [],
@@ -245,6 +251,7 @@ export default function AppView() {
     const refsToWatch = appViewResourceRefs.deployments.concat(
       appViewResourceRefs.statefulsets,
       appViewResourceRefs.daemonsets,
+      appViewResourceRefs.workloadmonitors,
       appViewResourceRefs.ingresses,
       appViewResourceRefs.services,
     );
@@ -281,8 +288,16 @@ export default function AppView() {
       );
     }
   }
-  const { services, ingresses, deployments, statefulsets, daemonsets, secrets, otherResources } =
-    appViewResourceRefs;
+  const {
+    services,
+    ingresses,
+    deployments,
+    statefulsets,
+    daemonsets,
+    workloadmonitors,
+    secrets,
+    otherResources,
+  } = appViewResourceRefs;
   const revision = selectedInstalledPkg?.revision ?? 0;
   const icon = selectedAvailablePkg?.iconUrl ?? placeholder;
 
@@ -378,6 +393,7 @@ export default function AppView() {
                       deployRefs={deployments}
                       statefulsetRefs={statefulsets}
                       daemonsetRefs={daemonsets}
+                      workloadmonitorRefs={workloadmonitors}
                       info={selectedInstalledPkg}
                     />
                     <AccessURLTable serviceRefs={services} ingressRefs={ingresses} />
@@ -393,6 +409,7 @@ export default function AppView() {
                       deployments,
                       statefulsets,
                       daemonsets,
+                      workloadmonitors,
                       secrets,
                       services,
                       otherResources,

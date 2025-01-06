@@ -146,7 +146,7 @@ export default function DeploymentForm() {
         // Get the chart name from packageId (last part after /)
         const chartParts = packageId?.split("/") || [];
         const chartName = chartParts[chartParts.length - 1]; // e.g. "redis" or "virtual-machine"
-  
+
         push(
           url.app.apps.get({
             context: { cluster: targetCluster, namespace: targetNamespace },
