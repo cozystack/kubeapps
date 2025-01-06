@@ -140,13 +140,16 @@ export default function ApplicationStatus({
         const wReady = get(w, src.readyKey, 0);
         let wTotal = get(w, src.totalKey);
         // For WorkloadMonitor, use observedReplicas if replicas is not set
-        if (src.type === "workloadmonitor" && wTotal === undefined && src.fallbackTotalKey) {
-          wTotal = get(w, src.fallbackTotalKey, 0);
+        if (src.type === "workloadmonitor" && wTotal === undefined) {
+          const observedReplicas = src.fallbackTotalKey ? get(w, src.fallbackTotalKey, 0) : 0;
+          const minReplicas = get(w, "spec.minReplicas", 0);
+          wTotal = Math.max(minReplicas, observedReplicas);
         } else {
           wTotal = wTotal || 0;
         }
-        if (wReady) {
-          currentReadyPods += wReady;
+        const adjustedReady = Math.min(wReady, wTotal);
+        if (adjustedReady) {
+          currentReadyPods += adjustedReady;
         }
         if (wTotal) {
           currentTotalPods += wTotal;
@@ -154,7 +157,7 @@ export default function ApplicationStatus({
         currentWorkloads = currentWorkloads.concat({
           name: w.metadata.name,
           replicas: wTotal,
-          readyReplicas: wReady,
+          readyReplicas: adjustedReady,
           type: src.type,
           resourceType: src.type === "workloadmonitor" ? get(w, "spec.type") : undefined,
           operational: src.type === "workloadmonitor" ? get(w, "status.operational") : undefined,
