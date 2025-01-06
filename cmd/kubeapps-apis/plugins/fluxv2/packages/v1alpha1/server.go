@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/restmapper"
 
@@ -66,7 +67,8 @@ type Server struct {
 	repoCache  *cache.NamespacedResourceWatcherCache
 	chartCache *cache.ChartCache
 
-	pluginConfig *common.FluxPluginConfig
+	pluginConfig    *common.FluxPluginConfig
+	discoveryClient discovery.CachedDiscoveryInterface
 }
 
 // NewServer returns a Server automatically configured with a function to obtain
@@ -110,6 +112,8 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 		if err != nil {
 			return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
 		}
+
+		discoveryClient := memory.NewMemCacheClient(discovery.NewDiscoveryClientForConfigOrDie(config))
 
 		// Set QPS and burst
 		config.QPS = clientQPS
@@ -161,6 +165,7 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 				chartCache:                 chartCache,
 				kubeappsCluster:            kubeappsCluster,
 				pluginConfig:               pluginConfig,
+				discoveryClient:            discoveryClient,
 			}, nil
 		}
 	}
@@ -611,6 +616,31 @@ func (s *Server) getRoleFromPackageRef(ctx context.Context, headers http.Header,
 	return role, nil
 }
 
+// getGVR определяет GroupVersionResource для заданного GroupResource
+func (s *Server) getGVR(gr schema.GroupResource) (schema.GroupVersionResource, error) {
+	_, apiResourceList, err := s.discoveryClient.ServerGroupsAndResources()
+	if err != nil {
+		return schema.GroupVersionResource{}, fmt.Errorf("failed to fetch server groups and resources: %w", err)
+	}
+
+	for _, resourceList := range apiResourceList {
+		gv, err := schema.ParseGroupVersion(resourceList.GroupVersion)
+		if err != nil {
+			continue
+		}
+		for _, resource := range resourceList.APIResources {
+			if resource.Name == gr.Resource && gv.Group == gr.Group {
+				return schema.GroupVersionResource{
+					Group:    gv.Group,
+					Version:  gv.Version,
+					Resource: resource.Name,
+				}, nil
+			}
+		}
+	}
+	return schema.GroupVersionResource{}, fmt.Errorf("resource %s not found in group %s", gr.Resource, gr.Group)
+}
+
 // extractResourceRefsFromRole extracts ResourceRefs from an RBAC role
 func (s *Server) extractResourceRefsFromRole(ctx context.Context, headers http.Header, role *unstructured.Unstructured, namespace string) ([]*corev1.ResourceRef, error) {
 	// Getting Discovery Client to work with RESTMapper
@@ -632,21 +662,31 @@ func (s *Server) extractResourceRefsFromRole(ctx context.Context, headers http.H
 		r := rule.(map[string]interface{})
 		resources, _ := r["resources"].([]interface{})
 		apiGroups, _ := r["apiGroups"].([]interface{})
+		resourceNames, _ := r["resourceNames"].([]interface{})
 
-		for _, resource := range resources {
-			resourceStr := resource.(string)
-			for _, apiGroup := range apiGroups {
-				apiGroupStr := apiGroup.(string)
+		// Skip, if resourceNames is empty
+		if len(resourceNames) == 0 {
+			continue
+		}
 
-				// Using GroupVersionResource to get GroupVersionKind
-				gvr := schema.GroupVersionResource{Group: apiGroupStr, Version: "v1", Resource: resourceStr}
+		for _, apiGroup := range apiGroups {
+			apiGroupStr := apiGroup.(string)
+			for _, resource := range resources {
+				resourceStr := resource.(string)
+
+				gr := schema.GroupResource{Group: apiGroupStr, Resource: resourceStr}
+				gvr, err := s.getGVR(gr)
+				if err != nil {
+					log.Errorf("Failed to get GVR for GroupResource %s: %v", gr.String(), err)
+					continue
+				}
+
 				gvk, err := mapper.KindFor(gvr)
 				if err != nil {
 					log.Errorf("Failed to get GroupVersionKind for GVR %v: %v", gvr, err)
 					continue
 				}
 
-				resourceNames, _ := r["resourceNames"].([]interface{})
 				for _, resourceName := range resourceNames {
 					resourceNameStr := resourceName.(string)
 					resourcesFromRole = append(resourcesFromRole, &corev1.ResourceRef{
@@ -659,7 +699,6 @@ func (s *Server) extractResourceRefsFromRole(ctx context.Context, headers http.H
 			}
 		}
 	}
-
 	return resourcesFromRole, nil
 }
 
