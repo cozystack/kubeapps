@@ -32,6 +32,7 @@ interface IWorkload {
   name: string;
   type: string;
   resourceType?: string;
+  operational?: boolean;
 }
 
 function flattenItemList(items: Array<IKubeItem<IResource | IK8sList<IResource, {}>>>) {
@@ -156,6 +157,7 @@ export default function ApplicationStatus({
           readyReplicas: wReady,
           type: src.type,
           resourceType: src.type === "workloadmonitor" ? get(w, "spec.type") : undefined,
+          operational: src.type === "workloadmonitor" ? get(w, "status.operational") : undefined,
         });
       });
     });
@@ -238,6 +240,7 @@ export default function ApplicationStatus({
               <th>Workload</th>
               <th>Type</th>
               <th>Ready</th>
+              <th>Operational</th>
             </tr>
           </thead>
           <tbody>
@@ -248,6 +251,18 @@ export default function ApplicationStatus({
                   <td>{workload.resourceType}</td>
                   <td>
                     {workload.readyReplicas}/{workload.replicas}
+                  </td>
+                  <td>
+                    {workload.operational !== undefined &&
+                      (workload.operational ? (
+                        <div className="color-icon-success">
+                          <CdsIcon shape="check-circle" size="md" solid={true} />
+                        </div>
+                      ) : (
+                        <div className="color-icon-warning">
+                          <CdsIcon shape="exclamation-triangle" size="md" solid={true} />
+                        </div>
+                      ))}
                   </td>
                 </tr>
               );
