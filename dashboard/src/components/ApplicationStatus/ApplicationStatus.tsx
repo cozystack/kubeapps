@@ -31,6 +31,7 @@ interface IWorkload {
   readyReplicas: number;
   name: string;
   type: string;
+  resourceType?: string;
 }
 
 function flattenItemList(items: Array<IKubeItem<IResource | IK8sList<IResource, {}>>>) {
@@ -136,10 +137,12 @@ export default function ApplicationStatus({
     ].forEach(src => {
       src.workloads.forEach(w => {
         const wReady = get(w, src.readyKey, 0);
-        let wTotal = get(w, src.totalKey, 0);
+        let wTotal = get(w, src.totalKey);
         // For WorkloadMonitor, use observedReplicas if replicas is not set
-        if (src.type === "workloadmonitor" && wTotal === 0 && src.fallbackTotalKey) {
+        if (src.type === "workloadmonitor" && wTotal === undefined && src.fallbackTotalKey) {
           wTotal = get(w, src.fallbackTotalKey, 0);
+        } else {
+          wTotal = wTotal || 0;
         }
         if (wReady) {
           currentReadyPods += wReady;
@@ -152,6 +155,7 @@ export default function ApplicationStatus({
           replicas: wTotal,
           readyReplicas: wReady,
           type: src.type,
+          resourceType: src.type === "workloadmonitor" ? get(w, "spec.type") : undefined,
         });
       });
     });
@@ -224,7 +228,7 @@ export default function ApplicationStatus({
         />
         <div className="application-status-pie-chart-label">
           <p className="application-status-pie-chart-number">{readyPods}</p>
-          <p className="application-status-pie-chart-text">Pod{readyPods > 1 ? "s" : ""}</p>
+          <p className="application-status-pie-chart-text">Workload{readyPods > 1 ? "s" : ""}</p>
         </div>
       </div>
       <Tooltip id="tooltip-application-status" className="extraClass" place="right">
@@ -232,6 +236,7 @@ export default function ApplicationStatus({
           <thead>
             <tr>
               <th>Workload</th>
+              <th>Type</th>
               <th>Ready</th>
             </tr>
           </thead>
@@ -240,6 +245,7 @@ export default function ApplicationStatus({
               return (
                 <tr key={`${workload.type}/${workload.name}`}>
                   <td>{workload.name}</td>
+                  <td>{workload.resourceType}</td>
                   <td>
                     {workload.readyReplicas}/{workload.replicas}
                   </td>
