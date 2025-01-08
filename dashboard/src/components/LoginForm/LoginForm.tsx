@@ -74,7 +74,7 @@ function LoginForm() {
     return (
       <LoadingWrapper
         className="margin-t-xxl"
-        loadingText={<h2>Welcome To Kubeapps</h2>}
+        loadingText={<h2>Welcome To Cozystack</h2>}
         loaded={false}
       />
     );

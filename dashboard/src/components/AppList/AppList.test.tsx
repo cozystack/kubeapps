@@ -211,7 +211,7 @@ context("while fetching apps", () => {
 context("when fetched but not apps available", () => {
   it("renders a welcome message", () => {
     const wrapper = mountWrapper(defaultStore, <AppList />);
-    expect(wrapper.find(".applist-empty").text()).toContain("Welcome To Kubeapps");
+    expect(wrapper.find(".applist-empty").text()).toContain("Welcome To Cozystack");
   });
 
   it("shows the search filter and deploy button (no apps available)", () => {

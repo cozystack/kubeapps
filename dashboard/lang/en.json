@@ -1,5 +1,5 @@
 {
-  "Kubeapps": "Kubeapps",
+  "Kubeapps": "Cozystack",
   "Submit": "Submit",
   "Token": "Token",
   "error-login-token": "There was an error connecting to the Kubernetes API. Please check that your token is valid.",

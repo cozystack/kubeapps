@@ -1,6 +1,6 @@
 {
-  "name": "Kubeapps Dashboard",
-  "short_name": "Kubeapps",
+  "name": "Cozystack Dashboard",
+  "short_name": "Cozystack",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",
