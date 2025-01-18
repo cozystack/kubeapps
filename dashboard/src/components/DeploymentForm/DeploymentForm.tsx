@@ -152,7 +152,7 @@ export default function DeploymentForm() {
             context: { cluster: targetCluster, namespace: targetNamespace },
             plugin: pluginObj,
             // Use chartName~releaseName format for the identifier
-            identifier: `${chartName}~${releaseName}`,
+            identifier: `${chartName}/${releaseName}`,
           } as AvailablePackageReference),
         );
       }
