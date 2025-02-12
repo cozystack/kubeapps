@@ -72,11 +72,7 @@ function LoginForm() {
 
   if (authenticating || !cookieChecked) {
     return (
-      <LoadingWrapper
-        className="margin-t-xxl"
-        loadingText={<h2>Welcome To Cozystack</h2>}
-        loaded={false}
-      />
+      <LoadingWrapper className="margin-t-xxl" loadingText={<h2>Welcome</h2>} loaded={false} />
     );
   }
   if (authenticated) {

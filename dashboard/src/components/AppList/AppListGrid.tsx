@@ -36,7 +36,7 @@ function AppListGrid(props: IAppListProps) {
         <AlertGroup status="info">
           Deploy applications on your Kubernetes cluster with a single click.
         </AlertGroup>
-        <h2>Welcome To Cozystack</h2>
+        <h2>Welcome</h2>
         <p>
           Start browsing your <Link to={url.app.catalog(cluster, namespace)}>favourite apps</Link>{" "}
           or check the{" "}

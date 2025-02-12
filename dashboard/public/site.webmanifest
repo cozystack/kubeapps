@@ -1,6 +1,6 @@
 {
-  "name": "Cozystack Dashboard",
-  "short_name": "Cozystack",
+  "name": "Dashboard",
+  "short_name": "Dashboard",
   "icons": [
     {
       "src": "/android-chrome-192x192.png",
