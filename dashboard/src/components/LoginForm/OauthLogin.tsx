@@ -14,8 +14,8 @@ function OAuthLogin(props: ILoginFormProps) {
   return (
     <section className="title" aria-labelledby="login-title" aria-describedby="login-desc">
       <h3 id="login-title" className="welcome">
-        {intl.formatMessage({ id: "login-title-welcome", defaultMessage: "Welcome to" })}
-        <span>{intl.formatMessage({ id: "Kubeapps", defaultMessage: "Kubeapps" })}</span>
+        {/* {intl.formatMessage({ id: "login-title-welcome", defaultMessage: "Welcome to" })}
+        <span>{intl.formatMessage({ id: "Kubeapps", defaultMessage: "Kubeapps" })}</span> */}
       </h3>
       <p id="login-desc" className="hint">
         {intl.formatMessage({
