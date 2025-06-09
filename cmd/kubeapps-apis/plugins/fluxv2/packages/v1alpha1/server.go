@@ -113,11 +113,11 @@ func NewServer(configGetter core.KubernetesConfigGetter, kubeappsCluster string,
 			return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
 		}
 
-		discoveryClient := memory.NewMemCacheClient(discovery.NewDiscoveryClientForConfigOrDie(config))
-
 		// Set QPS and burst
 		config.QPS = clientQPS
 		config.Burst = clientBurst
+
+		discoveryClient := memory.NewMemCacheClient(discovery.NewDiscoveryClientForConfigOrDie(config))
 
 		s := repoEventSink{
 			clientGetter: backgroundClientGetter,
