@@ -66,14 +66,21 @@ function ContextSelector() {
   const changeContext = () => {
     dispatch(actions.namespace.setNamespace(cluster, namespace));
     // Regex matching a namespaced route: e.g. /c/cluster/ns/namespace
-    const nsRegex = /^\/c\/([^/]*)\/ns\/[^/]*\//;
+    const nsRegex = /^\/c\/[^/]*\/ns\/[^/]*\//; // matches "/c/<cluster>/ns/<namespace>/"
+    const base = `/c/${cluster}/ns/${namespace}/`;
     if (nsRegex.test(location.pathname)) {
-      // Change the namespace in the route
-      navigate(
-        location.pathname
-          .replace(nsRegex, `/c/${cluster}/ns/${namespace}/`)
-          .concat(location.search),
-      );
+      const restOfPath = location.pathname.replace(nsRegex, "");
+      // All application-related routes start with "apps/"
+      if (restOfPath.startsWith("apps/")) {
+        // go to the apps list for the newly-selected namespace
+        navigate(app.apps.list(cluster, namespace) + location.search);
+      } else {
+        // keep the remainder of the path (catalog, operators, etc.)
+        navigate(base + restOfPath + location.search);
+      }
+    } else {
+      // fallback: just go to the apps list
+      navigate(app.apps.list(cluster, namespace) + location.search);
     }
     setOpen(false);
   };
