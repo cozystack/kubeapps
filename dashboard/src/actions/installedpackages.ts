@@ -124,7 +124,6 @@ export function getInstalledPackage(
         // Get the details of the available package that corresponds to the installed package
         const resp = await PackagesService.getAvailablePackageDetail(
           installedPackageDetail?.availablePackageRef,
-          installedPackageDetail?.currentVersion?.pkgVersion,
         );
         availablePackageDetail = resp.availablePackageDetail;
       } catch (e: any) {
