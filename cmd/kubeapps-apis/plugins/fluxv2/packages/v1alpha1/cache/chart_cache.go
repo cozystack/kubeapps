@@ -1,4 +1,4 @@
-// Copyright 2021-2023 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contribchart.ChartVersionsutors.
 // SPDX-License-Identifier: Apache-2.0
 
 package cache
@@ -165,11 +165,18 @@ func (c *ChartCache) SyncCharts(charts []models.Chart, downloadFn DownloadChartF
 			u.RawQuery = q.Encode()
 		}
 
+		rawURL := chart.ChartVersions[0].URLs[0]
+		fullURL, err := resolveChartURL(chart.Repo.URL, rawURL)
+		if err != nil {
+			log.Warningf("Skipping chart [%s]: %v", chart.ID, err)
+			continue
+		}
+
 		entry := chartCacheStoreEntry{
 			namespace:  chart.Repo.Namespace,
 			id:         chart.ID,
 			version:    chart.ChartVersions[0].Version,
-			url:        u.String(),
+			url:        fullURL,
 			downloadFn: downloadFn,
 			deleted:    false,
 		}
@@ -538,13 +545,18 @@ func (c *ChartCache) Get(key string, chart *models.Chart, downloadFn DownloadCha
 				if len(v.URLs) == 0 {
 					log.Warningf("The chart: [%s], version: [%s] has no URLs", chart.ID, v.Version)
 				} else {
+					fullURL, err := resolveChartURL(chart.Repo.URL, v.URLs[0])
+					if err != nil {
+						return nil, err
+					}
 					entry = &chartCacheStoreEntry{
 						namespace:  namespace,
 						id:         chartID,
 						version:    v.Version,
-						url:        v.URLs[0],
+						url:        fullURL,
 						downloadFn: downloadFn,
 					}
+
 				}
 				break
 			}
@@ -694,4 +706,22 @@ func ChartCacheComputeValue(chartID, chartUrl, chartVersion string, downloadFn D
 	} else {
 		return gobBuf.Bytes(), nil
 	}
+}
+
+func resolveChartURL(repo string, chartPath string) (string, error) {
+	u, err := url.Parse(chartPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid chart URL %q: %w", chartPath, err)
+	}
+	if u.IsAbs() { // уже полный URL
+		return u.String(), nil
+	}
+
+	base, err := url.Parse(repo)
+	if err != nil {
+		return "", fmt.Errorf("invalid repo URL %q: %w", repo, err)
+	}
+	// гарантируем, что в конце есть ровно один «/»
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/"
+	return base.ResolveReference(u).String(), nil
 }
