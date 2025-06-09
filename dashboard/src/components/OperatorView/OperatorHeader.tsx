@@ -18,7 +18,6 @@ export default function OperatorHeader(props: IOperatorHeaderProps) {
       title={title}
       titleSize="md"
       icon={icon || placeholder}
-      operator={true}
       version={
         version ? (
           <div className="header-version">

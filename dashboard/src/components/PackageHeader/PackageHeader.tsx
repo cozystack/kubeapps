@@ -45,7 +45,6 @@ export default function PackageHeader({
       }
       titleSize="md"
       icon={availablePackageDetail?.iconUrl ? availablePackageDetail.iconUrl : placeholder}
-      plugin={availablePackageDetail.availablePackageRef.plugin}
       version={
         hideVersionsSelector ? (
           <></>

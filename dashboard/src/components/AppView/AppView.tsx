@@ -360,7 +360,6 @@ export default function AppView() {
                 <span>from an unknown package</span>
               )
             }
-            plugin={selectedInstalledPkg?.availablePackageRef?.plugin}
             icon={icon}
             buttons={getButtons(selectedInstalledPkg, error, revision)}
           />
