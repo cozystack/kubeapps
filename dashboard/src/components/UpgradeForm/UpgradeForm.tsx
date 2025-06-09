@@ -1,7 +1,6 @@
 // Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
-import { CdsFormGroup } from "@cds/react/forms";
 import actions from "actions";
 import AlertGroup from "components/AlertGroup";
 import AvailablePackageDetailExcerpt from "components/Catalog/AvailablePackageDetailExcerpt";
@@ -9,7 +8,6 @@ import Column from "components/Column";
 import DeploymentFormBody from "components/DeploymentForm/DeploymentFormBody";
 import LoadingWrapper from "components/LoadingWrapper";
 import PackageHeader from "components/PackageHeader/PackageHeader";
-import PackageVersionSelector from "components/PackageHeader/PackageVersionSelector";
 import Row from "components/Row";
 import * as jsonpatch from "fast-json-patch";
 import { usePush } from "hooks/push";
@@ -42,7 +40,7 @@ function applyModifications(mods: jsonpatch.Operation[], values: string) {
   return values;
 }
 
-function UpgradeForm(props: IUpgradeFormProps) {
+function UpgradeForm(_: IUpgradeFormProps) {
   const dispatch: ThunkDispatch<IStoreState, null, Action> = useDispatch();
 
   const {
@@ -67,40 +65,39 @@ function UpgradeForm(props: IUpgradeFormProps) {
   const [valuesModified, setValuesModified] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
+  /* Load the list of versions once */
   useEffect(() => {
-    // This block just will be run once, given that populating
-    // the list of versions does not depend on anything else
     if (selectedPackage.versions.length === 0) {
       dispatch(
         actions.availablepackages.fetchAvailablePackageVersions(
           installedAppInstalledPackageDetail?.availablePackageRef,
         ),
       );
-      if (installedAppAvailablePackageDetail) {
-        // Additionally, mark the current installed package version as the selected,
-        // next time, the selection will be handled by selectVersion()
-        dispatch(
-          actions.availablepackages.receiveSelectedAvailablePackageDetail(
-            installedAppAvailablePackageDetail,
-          ),
-        );
-      }
-      // If a version has been manually selected (eg. in the URL), fetch it explicitly
-      if (props.version) {
-        dispatch(
-          actions.availablepackages.fetchAndSelectAvailablePackageDetail(
-            installedAppInstalledPackageDetail?.availablePackageRef,
-            props.version,
-          ),
-        );
-      }
     }
   }, [
     dispatch,
     installedAppInstalledPackageDetail?.availablePackageRef,
     selectedPackage.versions.length,
-    installedAppAvailablePackageDetail,
-    props.version,
+  ]);
+
+  /* After versions are loaded, always select the latest (assumes list is already sorted DESC). */
+  useEffect(() => {
+    if (
+      versions.length > 0 &&
+      availablePackageDetail?.version?.pkgVersion !== versions[0].pkgVersion
+    ) {
+      dispatch(
+        actions.availablepackages.fetchAndSelectAvailablePackageDetail(
+          installedAppInstalledPackageDetail?.availablePackageRef,
+          versions[0].pkgVersion,
+        ),
+      );
+    }
+  }, [
+    dispatch,
+    versions,
+    availablePackageDetail?.version?.pkgVersion,
+    installedAppInstalledPackageDetail?.availablePackageRef,
   ]);
 
   useEffect(() => {
@@ -156,15 +153,6 @@ function UpgradeForm(props: IUpgradeFormProps) {
     setAppValues(value);
   };
 
-  const selectVersion = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    dispatch(
-      actions.availablepackages.fetchAndSelectAvailablePackageDetail(
-        installedAppInstalledPackageDetail?.availablePackageRef,
-        e.currentTarget.value,
-      ),
-    );
-  };
-
   const push = usePush();
 
   const handleDeploy = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -212,7 +200,7 @@ function UpgradeForm(props: IUpgradeFormProps) {
               releaseName={installedAppInstalledPackageDetail?.installedPackageRef?.identifier}
               availablePackageDetail={availablePackageDetail}
               versions={versions}
-              onSelect={selectVersion}
+              onSelect={() => undefined}
               currentVersion={installedAppAvailablePackageDetail?.version?.pkgVersion}
               selectedVersion={pkgVersion}
               hideVersionsSelector={true}
@@ -233,22 +221,6 @@ function UpgradeForm(props: IUpgradeFormProps) {
                     </Column>
                     <Column span={9}>
                       <form onSubmit={handleDeploy} ref={formRef}>
-                        <CdsFormGroup
-                          className="deployment-form"
-                          layout="vertical"
-                          controlWidth="shrink"
-                        >
-                          <PackageVersionSelector
-                            versions={versions}
-                            selectedVersion={pkgVersion}
-                            onSelect={selectVersion}
-                            currentVersion={
-                              installedAppInstalledPackageDetail?.currentVersion?.pkgVersion
-                            }
-                            label={"Package Version"}
-                            message={"Select the version this package will be upgraded to."}
-                          />
-                        </CdsFormGroup>
                         <DeploymentFormBody
                           deploymentEvent="upgrade"
                           packageId={

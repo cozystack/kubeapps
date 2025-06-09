@@ -17,8 +17,7 @@ import UpgradeForm from "../UpgradeForm/UpgradeForm";
 
 function AppUpgrade() {
   const dispatch: ThunkDispatch<IStoreState, null, Action> = useDispatch();
-  const { cluster, namespace, releaseName, pluginName, pluginVersion, version } =
-    ReactRouter.useParams();
+  const { cluster, namespace, releaseName, pluginName, pluginVersion } = ReactRouter.useParams();
 
   const {
     apps: {
@@ -68,7 +67,7 @@ function AppUpgrade() {
   if (installedAppAvailablePackageDetail && installedAppInstalledPackageDetail && selectedPackage) {
     return (
       <div>
-        <UpgradeForm version={version} />
+        <UpgradeForm />
       </div>
     );
   }
