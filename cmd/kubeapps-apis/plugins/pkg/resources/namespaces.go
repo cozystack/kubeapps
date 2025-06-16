@@ -80,8 +80,8 @@ func nsCheckerWorker(client kubernetes.Interface, nsJobs <-chan checkNSJob, resu
 		res, err := client.AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), &authorizationapi.SelfSubjectAccessReview{
 			Spec: authorizationapi.SelfSubjectAccessReviewSpec{
 				ResourceAttributes: &authorizationapi.ResourceAttributes{
-					Group:     "",
-					Resource:  "secrets",
+					Group:     "cozystack.io",
+					Resource:  "workloadmonitors",
 					Verb:      "get",
 					Namespace: j.ns.Name,
 				},

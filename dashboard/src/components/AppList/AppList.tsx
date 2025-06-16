@@ -3,7 +3,6 @@
 
 import { CdsButton } from "@cds/react/button";
 import { CdsIcon } from "@cds/react/icon";
-import { CdsToggle, CdsToggleGroup } from "@cds/react/toggle";
 import actions from "actions";
 import ErrorAlert from "components/ErrorAlert";
 import LoadingWrapper from "components/LoadingWrapper/LoadingWrapper";
@@ -13,7 +12,6 @@ import { useEffect, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import * as ReactRouter from "react-router-dom";
 import { Link } from "react-router-dom";
-import { Kube } from "shared/Kube";
 import { IStoreState } from "shared/types";
 import * as url from "shared/url";
 import PageHeader from "../PageHeader/PageHeader";
@@ -38,11 +36,6 @@ function AppList() {
 
   const [searchFilter, setSearchFilter] = useState("");
   const [allNS, setAllNS] = useState(allNSQuery === "yes");
-  const [canSetAllNS, setCanSetAllNS] = useState(false);
-  const toggleListAllNS = () => {
-    submitFilters(!allNS);
-    setAllNS(!allNS);
-  };
   const push = usePush();
 
   const submitFilters = (allns: boolean) => {
@@ -79,14 +72,6 @@ function AppList() {
     }
   }, [dispatch, cluster, currentNamespace, featureFlags, allNS]);
 
-  useEffect(() => {
-    // In order to be able to list applications in all namespaces, it's necessary to be able
-    // to list/get secrets in all of them.
-    Kube.canI(cluster, "", "secrets", "list", "")
-      .then(allowed => setCanSetAllNS(allowed))
-      ?.catch(() => setCanSetAllNS(false));
-  }, [cluster]);
-
   /* eslint-disable jsx-a11y/label-has-associated-control */
   return (
     <section>
@@ -101,18 +86,6 @@ function AppList() {
               value={searchFilter}
               submitFilters={submitSearchFilter}
             />
-            {canSetAllNS && (
-              <CdsToggleGroup className="flex-v-center">
-                <CdsToggle>
-                  <label>Show apps in all namespaces</label>
-                  <input
-                    type="checkbox"
-                    onChange={toggleListAllNS}
-                    checked={allNSQuery === "yes" || allNS}
-                  />
-                </CdsToggle>
-              </CdsToggleGroup>
-            )}
           </>
         }
         buttons={[
