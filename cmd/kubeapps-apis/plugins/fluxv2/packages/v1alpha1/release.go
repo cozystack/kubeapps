@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -268,15 +267,9 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 
 	// Set values if provided
 	if values != "" {
-		// Remove comments before parsing
-		noComments := removeYAMLComments(values)
 		var specValues map[string]interface{}
-		// Try parsing as JSON first
-		if err := json.Unmarshal([]byte(noComments), &specValues); err != nil {
-			// If JSON parsing fails, try YAML
-			if err2 := yaml.Unmarshal([]byte(noComments), &specValues); err2 != nil {
-				return nil, fmt.Errorf("failed to parse values: %w", err)
-			}
+		if err := yaml.Unmarshal([]byte(values), &specValues); err != nil {
+			return nil, fmt.Errorf("failed to parse values: %w", err)
 		}
 		obj.Object["spec"] = specValues
 	}
@@ -308,23 +301,6 @@ func (s *Server) newRelease(ctx context.Context, headers http.Header, packageRef
 		Identifier: fmt.Sprintf("%s/%s", kind, created.GetName()),
 		Plugin:     GetPluginDetail(),
 	}, nil
-}
-
-// Helper function to remove YAML comments
-func removeYAMLComments(input string) string {
-	var result strings.Builder
-	scanner := bufio.NewScanner(strings.NewReader(input))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if idx := strings.Index(line, "#"); idx != -1 {
-			line = strings.TrimSpace(line[:idx])
-		}
-		if line != "" {
-			result.WriteString(line)
-			result.WriteString("\n")
-		}
-	}
-	return result.String()
 }
 
 func (s *Server) getGVRFromPackageID(packageID string) (schema.GroupVersionResource, *common.ConfigResource, error) {
@@ -405,15 +381,9 @@ func (s *Server) updateRelease(ctx context.Context, headers http.Header, install
 
 	// Update values if specified
 	if values != "" {
-		// Remove comments before parsing
-		noComments := removeYAMLComments(values)
 		var specValues map[string]interface{}
-		// Try parsing as JSON first
-		if err := json.Unmarshal([]byte(noComments), &specValues); err != nil {
-			// If JSON parsing fails, try YAML
-			if err2 := yaml.Unmarshal([]byte(noComments), &specValues); err2 != nil {
-				return nil, fmt.Errorf("failed to parse values: %w", err)
-			}
+		if err := yaml.Unmarshal([]byte(values), &specValues); err != nil {
+			return nil, fmt.Errorf("failed to parse values: %w", err)
 		}
 		obj.Object["spec"] = specValues
 	}
