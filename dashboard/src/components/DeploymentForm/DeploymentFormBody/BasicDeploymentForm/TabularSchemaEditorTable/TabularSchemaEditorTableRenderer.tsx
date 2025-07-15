@@ -10,6 +10,7 @@ import BooleanParam from "./Params/BooleanParam";
 import CustomFormComponentLoader from "./Params/CustomFormParam";
 import SliderParam from "./Params/SliderParam";
 import TextParam from "./Params/TextParam";
+import ObjectParam from "./Params/ObjectParam";
 
 const MAX_LENGTH = 60;
 
@@ -169,6 +170,15 @@ export function renderConfigCurrentValuePro(
 
   // if it isn't a custom component or an with more properties, render an input
   switch (param.type) {
+    case "object":
+      return (
+        <ObjectParam
+          id={param.key}
+          label={param.title || param.path}
+          param={param}
+          handleBasicFormParamChange={handleBasicFormParamChange}
+        />
+      );
     case "boolean":
       return (
         <BooleanParam
@@ -210,7 +220,6 @@ export function renderConfigCurrentValuePro(
           handleBasicFormParamChange={handleBasicFormParamChange}
         />
       );
-    case "object":
     default:
       return (
         <TextParam

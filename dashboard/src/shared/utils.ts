@@ -39,31 +39,35 @@ export function escapeRegExp(str: string) {
 
 export function getStringValue(value: any, type?: string) {
   const usedType = type || typeof value;
-  let result = value?.toString();
-  if (["array", "object"].includes(usedType)) {
-    try {
-      result = JSON.stringify(value);
-    } catch (e) {
-      result = value?.toString();
-    }
+  if (!["array", "object"].includes(usedType)) {
+    return value?.toString() ?? "";
   }
-  return result || "";
+
+  try {
+    return JSON.stringify(value ?? (usedType === "array" ? [] : {}));
+  } catch {
+    return value?.toString() ?? "";
+  }
 }
 
 export function getValueFromString(value: string, type?: string) {
   const usedType = type || typeof value;
-  let result = value?.toString();
-  if (["array", "object"].includes(usedType)) {
-    try {
-      result = JSON.parse(value);
-      if (usedType === "object" && typeof result !== "object") {
-        result = value?.toString();
-      }
-    } catch (e) {
-      result = value?.toString();
-    }
+  if (!["array", "object"].includes(usedType)) {
+    return value;
   }
-  return result;
+
+  const emptyFallback = usedType === "array" ? [] : {};
+  if (!value?.trim()) return emptyFallback;
+
+  try {
+    const parsed = JSON.parse(value);
+    if (usedType === "array" && Array.isArray(parsed)) return parsed;
+    if (usedType === "object" && typeof parsed === "object" && !Array.isArray(parsed))
+      return parsed;
+    return emptyFallback;
+  } catch {
+    return emptyFallback;
+  }
 }
 
 export function getValueFromEvent(

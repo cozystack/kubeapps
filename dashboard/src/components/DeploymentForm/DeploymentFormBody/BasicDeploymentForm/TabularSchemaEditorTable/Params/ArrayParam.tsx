@@ -10,6 +10,7 @@ import { CdsSelect } from "@cds/react/select";
 import { CdsToggle } from "@cds/react/toggle";
 import Column from "components/Column";
 import Row from "components/Row";
+import ObjectParam from "./ObjectParam";
 import { isEmpty } from "lodash";
 import { useState } from "react";
 import { validateValuesSchema } from "shared/schema";
@@ -187,17 +188,25 @@ export default function ArrayParam(props: IArrayParamProps) {
           );
         case "object":
           return (
-            <CdsInput>
-              <input
-                required={param.isRequired}
-                disabled={param.readOnly}
-                aria-label={label}
-                value={getStringValue(currentArrayItems[index])}
-                onChange={e =>
-                  onChangeArrayItem(e, index, getValueFromString(e.currentTarget.value, "object"))
+            <ObjectParam
+              id={`${id}-${index}`}
+              label={`${label}[${index}]`}
+              param={{
+                ...param,
+                currentValue: currentArrayItems[index] ?? {},
+              }}
+
+              handleBasicFormParamChange={p => e => {
+                try {
+                  const raw = JSON.parse(e.currentTarget.value || "{}");
+                  const obj =
+                    typeof raw === "object" && !Array.isArray(raw) ? (raw as object) : {};
+                  onChangeArrayItem(e, index, obj);
+                } catch {
+                  // ignore invalid JSON
                 }
-              />
-            </CdsInput>
+              }}
+            />
           );
         case "array":
           return (
