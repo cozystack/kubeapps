@@ -7,6 +7,8 @@ import Row from "components/Row";
 import monaco from "monaco-editor/esm/vs/editor/editor.api"; // for types only
 import { useEffect, useState } from "react";
 import { MonacoDiffEditor } from "react-monaco-editor";
+import { useMemo } from "react";
+import { parseToYamlNode, toStringYamlNode } from "shared/yamlUtils";
 import { useSelector } from "react-redux";
 import { IStoreState } from "shared/types";
 
@@ -35,7 +37,26 @@ export default function AdvancedDeploymentForm(props: IAdvancedDeploymentForm) {
     deploymentEvent === "upgrade" ? false : true,
   );
   const [useDiffEditor, setUseDiffEditor] = useState(true);
+
   const [diffValues, setDiffValues] = useState(valuesFromTheAvailablePackage);
+
+  const displayOriginal = useMemo(() => {
+    try {
+      const node = parseToYamlNode(valuesFromTheParentContainer || "");
+      return toStringYamlNode(node);
+    } catch {
+      return valuesFromTheParentContainer || "";
+    }
+  }, [valuesFromTheParentContainer]);
+
+  const displayDiff = useMemo(() => {
+    try {
+      const node = parseToYamlNode(diffValues || "");
+      return toStringYamlNode(node);
+    } catch {
+      return diffValues || "";
+    }
+  }, [diffValues]);
 
   const diffEditorOptions = {
     renderSideBySide: false,
@@ -221,8 +242,8 @@ export default function AdvancedDeploymentForm(props: IAdvancedDeploymentForm) {
       <br />
       <div className="deployment-form-tabs-data values-editor">
         <MonacoDiffEditor
-          value={valuesFromTheParentContainer}
-          original={diffValues}
+          value={displayOriginal}
+          original={displayDiff}
           height="90vh"
           language="yaml"
           theme={theme === "dark" ? "vs-dark" : "light"}

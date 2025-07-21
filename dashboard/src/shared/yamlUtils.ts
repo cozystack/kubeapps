@@ -29,6 +29,17 @@ export function parseToString(object?: object | string) {
 }
 
 export function toStringYamlNode(valuesNode: YAML.Document.Parsed<YAML.ParsedNode>) {
+  const root = valuesNode.contents;
+  if (root && YAML.isMap(root)) {
+    for (const pair of root.items) {
+      if (YAML.isScalar(pair.key) && pair.key.value === "cloudInit") {
+        const val = pair.value;
+        if (YAML.isScalar(val) && typeof val.value === "string" && val.value.includes("\n")) {
+          val.type = Scalar.BLOCK_LITERAL;
+        }
+      }
+    }
+  }
   return valuesNode.toString(toStringOptions);
 }
 
