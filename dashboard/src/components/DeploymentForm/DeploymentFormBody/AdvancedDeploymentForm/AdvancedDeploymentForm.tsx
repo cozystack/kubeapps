@@ -175,28 +175,24 @@ export default function AdvancedDeploymentForm(props: IAdvancedDeploymentForm) {
                 {/* eslint-disable-next-line jsx-a11y/label-has-associated-control */}
                 <label>Enable diff editor:</label>
                 <CdsRadio>
-                  <label htmlFor="diff-compare-enable-true">Yes</label>
                   <input
                     id="diff-compare-enable-true"
                     type="radio"
-                    name="true"
+                    name="diff-editor"
                     checked={useDiffEditor}
-                    onChange={e => {
-                      setUseDiffEditor(e.target.checked);
-                    }}
+                    onChange={() => setUseDiffEditor(true)}
                   />
+                  <label htmlFor="diff-compare-enable-true">Yes</label>
                 </CdsRadio>
                 <CdsRadio>
-                  <label htmlFor="diff-compare-enable-false">No</label>
                   <input
                     id="diff-compare-enable-false"
                     type="radio"
-                    name="deployed"
+                    name="diff-editor"
                     checked={!useDiffEditor}
-                    onChange={e => {
-                      setUseDiffEditor(!e.target.checked);
-                    }}
+                    onChange={() => setUseDiffEditor(false)}
                   />
+                  <label htmlFor="diff-compare-enable-false">No</label>
                 </CdsRadio>
               </CdsRadioGroup>
             </div>
