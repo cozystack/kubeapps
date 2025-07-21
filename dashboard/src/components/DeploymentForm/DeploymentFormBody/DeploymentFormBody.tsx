@@ -301,6 +301,25 @@ function DeploymentFormBody({
   const tabColumns: [JSX.Element, () => void][] = [];
   const tabData: JSX.Element[] = [];
 
+  // Text editor creation
+  tabColumns.push([
+    // This is a tuple, not an array requiring a key.
+    // eslint-disable-next-line react/jsx-key
+    <div>
+      <span>YAML editor</span>
+    </div>,
+    saveAllChanges,
+  ]);
+  tabData.push(
+    <AdvancedDeploymentForm
+      valuesFromTheParentContainer={valuesFromTheParentContainer}
+      deploymentEvent={deploymentEvent}
+      valuesFromTheAvailablePackage={valuesFromTheAvailablePackage || ""}
+      valuesFromTheDeployedPackage={valuesFromTheDeployedPackage || ""}
+      handleValuesChange={handleYAMLEditorChange}
+      key="advanced-deployment-form"
+    ></AdvancedDeploymentForm>,
+  );
   // Basic form creation
   if (shouldRenderBasicForm(schemaFromTheParentContainerParsed)) {
     tabColumns.push([
@@ -323,26 +342,6 @@ function DeploymentFormBody({
       </>,
     );
   }
-
-  // Text editor creation
-  tabColumns.push([
-    // This is a tuple, not an array requiring a key.
-    // eslint-disable-next-line react/jsx-key
-    <div>
-      <span>YAML editor</span>
-    </div>,
-    saveAllChanges,
-  ]);
-  tabData.push(
-    <AdvancedDeploymentForm
-      valuesFromTheParentContainer={valuesFromTheParentContainer}
-      deploymentEvent={deploymentEvent}
-      valuesFromTheAvailablePackage={valuesFromTheAvailablePackage || ""}
-      valuesFromTheDeployedPackage={valuesFromTheDeployedPackage || ""}
-      handleValuesChange={handleYAMLEditorChange}
-      key="advanced-deployment-form"
-    ></AdvancedDeploymentForm>,
-  );
   if (featureFlags?.schemaEditor?.enabled) {
     // Schema editor creation, if the feature flag is enabled
     tabColumns.push([
