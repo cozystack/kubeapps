@@ -7,8 +7,6 @@ import Row from "components/Row";
 import monaco from "monaco-editor/esm/vs/editor/editor.api"; // for types only
 import { useEffect, useState } from "react";
 import { MonacoDiffEditor } from "react-monaco-editor";
-import { useMemo } from "react";
-import { parseToYamlNode, toStringYamlNode } from "shared/yamlUtils";
 import { useSelector } from "react-redux";
 import { IStoreState } from "shared/types";
 
@@ -40,23 +38,8 @@ export default function AdvancedDeploymentForm(props: IAdvancedDeploymentForm) {
 
   const [diffValues, setDiffValues] = useState(valuesFromTheAvailablePackage);
 
-  const displayOriginal = useMemo(() => {
-    try {
-      const node = parseToYamlNode(valuesFromTheParentContainer || "");
-      return toStringYamlNode(node);
-    } catch {
-      return valuesFromTheParentContainer || "";
-    }
-  }, [valuesFromTheParentContainer]);
-
-  const displayDiff = useMemo(() => {
-    try {
-      const node = parseToYamlNode(diffValues || "");
-      return toStringYamlNode(node);
-    } catch {
-      return diffValues || "";
-    }
-  }, [diffValues]);
+  const displayOriginal = valuesFromTheParentContainer ?? "";
+  const displayDiff = diffValues;
 
   const diffEditorOptions = {
     renderSideBySide: false,
